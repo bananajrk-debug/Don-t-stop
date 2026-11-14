@@ -23,7 +23,7 @@
     <label for="name">なまえ</label>
     <input id="name" maxlength="10" placeholder="なまえ">
     <button id="go">乗車する</button>
-    <p>←→ / AD：移動　Space / W：ジャンプ<br>E：操作（長押しも）　Q：加減弁を下げる<br>R：結果画面でもう一度</p>
+    <p>←→ / AD：移動　Space / W：ジャンプ<br>E：操作（長押しも）　Q：加減弁を下げる<br>R：結果画面でもう一度／プレイ中は2秒長押しでリセット</p>
   </div>
 </div>
 <script src="/socket.io/socket.io.js"></script>
@@ -307,7 +307,7 @@ function drawHUD(gs, me) {
     }
   }
   ctx.fillStyle = 'rgba(255,255,255,0.75)'; ctx.font = '13px sans-serif'; ctx.textAlign = 'center';
-  ctx.fillText('←→ 移動 ／ Space ジャンプ ／ E 操作 ／ Q 加減弁を下げる', W / 2, Hh - 16);
+  ctx.fillText('←→ 移動 ／ Space ジャンプ ／ E 操作 ／ Q 加減弁を下げる ／ R長押し リセット', W / 2, Hh - 16);
 
   if (gs.phase === 'result') {
     ctx.fillStyle = 'rgba(28,22,40,0.75)'; ctx.fillRect(0, 0, W, Hh);
@@ -322,7 +322,7 @@ function drawHUD(gs, me) {
     } else {
       ctx.font = 'bold 48px sans-serif'; ctx.fillText('機関車が壊れた…', W / 2, Hh / 2);
     }
-    ctx.font = 'bold 20px sans-serif'; ctx.fillText('R でもう一度', W / 2, Hh / 2 + 110);
+    ctx.font = 'bold 20px sans-serif'; ctx.fillText('R でもう一度（20秒で自動的に最初から）', W / 2, Hh / 2 + 110);
   }
 }
 
