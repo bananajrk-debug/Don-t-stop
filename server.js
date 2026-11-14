@@ -250,7 +250,7 @@ function tick(dt) {
 
 function restart() {
   g = newGame();
-  for (const p of Object.values(players)) spawn(p);
+  for (const p of Object.values(players)) { spawn(p); p.rHold = 0; }
   msg('出発進行！');
 }
 
@@ -274,7 +274,11 @@ io.on('connection', (socket) => {
     // l=左 r=右 j=ジャンプ e=操作 q=加減弁を下げる restart=Rキー
     p.input = { l: !!inp.l, r: !!inp.r, j: !!inp.j, e: !!inp.e, q: !!inp.q, restart: !!inp.rst };
   });
-  socket.on('disconnect', () => { delete players[socket.id]; });
+  socket.on('disconnect', () => {
+    delete players[socket.id];
+    // 誰もいなくなったら最初からにする
+    if (Object.keys(players).length === 0) g = newGame();
+  });
 });
 
 // 結果画面で誰かがRを押したらリスタート
@@ -282,8 +286,17 @@ const DT = 1 / 30;
 let frame = 0;
 setInterval(() => {
   for (const p of Object.values(players)) {
-    if (p.input.restart && !p.prevRestart && g.phase === 'result') { restart(); }
+    // 結果画面ではRを押すだけ、プレイ中はRを2秒長押しでリセット
+    p.rHold = p.input.restart ? (p.rHold || 0) + DT : 0;
+    const pressR = p.input.restart && !p.prevRestart;
     p.prevRestart = p.input.restart;
+    if (g.phase === 'result' && pressR) { restart(); break; }
+    if (g.phase === 'play' && p.rHold > 2) { const who = p.name; restart(); msg(`${who} がリセットした`); break; }
+  }
+  // 結果画面は20秒たったら自動で最初から
+  if (g.phase === 'result') {
+    g.resultTimer = (g.resultTimer || 0) + DT;
+    if (g.resultTimer > 20) restart();
   }
   tick(DT);
   if (++frame % 2 === 0) {
