@@ -33,7 +33,7 @@ function trainAngle(x) { return Math.atan((ground(x + 400) - ground(x - 400)) / 
 
 // ===== 列車の中の足場・はしご（列車の中での座標。yは上がマイナス） =====
 const PLATS = [
-  { x1: -560, x2: -262, y: -260 }, // 炭水車の上（石炭の山）
+  { x1: -560, x2: -240, y: -260 }, // 炭水車の上（石炭の山）
   { x1: -262, x2: 545, y: -150 },  // 運転台の床〜ランボード（ボイラー横の通路）
   { x1: -240, x2: -90, y: -300 },  // 運転台の棚（加減弁・圧力計）
   { x1: -285, x2: -40, y: -470 },  // 運転台の屋根
@@ -75,7 +75,11 @@ function newGame() {
   };
 }
 g = newGame();
-function msg(text) { g.msgs.push({ text, t: g.t }); if (g.msgs.length > 5) g.msgs.shift(); }
+function msg(text) {
+  const same = g.msgs.find(m => m.text === text);
+  if (same) { same.t = g.t; return; }
+  g.msgs.push({ text, t: g.t }); if (g.msgs.length > 5) g.msgs.shift();
+}
 
 // 列車の中の座標 → 世界の座標
 function toWorldPos(lx, ly) {
@@ -93,7 +97,7 @@ function dropCarried(p, lost) {
   const it = g.items.find(i => i.id === p.carry);
   if (it) {
     if (lost) g.items = g.items.filter(i => i !== it);
-    else { it.holder = null; it.lx = p.lx; it.ly = p.ly - 30; it.lvx = 0; it.lvy = 0; }
+    else { it.holder = null; it.lx = p.lx; it.ly = p.ly - 30; it.lvx = 0; it.lvy = 0; it.rest = 0; }
   }
   p.carry = null;
 }
@@ -114,7 +118,8 @@ function spotOf(p) {
   for (const s of SPOTS) if (Math.abs(p.lx - s.x) < s.r && Math.abs(p.ly - s.y) < 2) return s.id;
   return null;
 }
-function nearTower() { return Math.abs(g.x - TOWER_X) < 220 && Math.abs(g.v) < 20; }
+// 給水口（列車の中で x=-300）が給水塔の下を通っている間ならOK。止まる必要なし
+function nearTower() { return Math.abs(g.x - 300 - TOWER_X) < 260; }
 
 // 足場への着地（上から落ちてきたときだけ乗れる）
 function landY(x, y0, y1) {
@@ -145,13 +150,13 @@ function tick(dt) {
     if (p.carry) {
       if (pressQ) {
         const it = g.items.find(i => i.id === p.carry);
-        if (it) { it.holder = null; it.lx = p.lx + p.face * 10; it.ly = p.ly - 30; it.lvx = p.face * 230 + p.lvx; it.lvy = -170; }
+        if (it) { it.holder = null; it.lx = p.lx + p.face * 10; it.ly = p.ly - 30; it.lvx = p.face * 230 + p.lvx; it.lvy = -170; it.rest = 0; }
         p.carry = null;
         continue;
       }
       if (p.spot === 'fire' && pressE) {
         g.items = g.items.filter(i => i.id !== p.carry); p.carry = null;
-        g.fire = Math.min(100, g.fire + 12);
+        g.fire = Math.min(100, g.fire + 20);
         continue;
       }
     } else if (pressE) {
@@ -174,8 +179,8 @@ function tick(dt) {
     if (p.spot === 'whistle' && inp.e) g.whistling = true;
     if (p.spot === 'gauge') g.gaugeSeen = true;
     if (p.spot === 'waterin' && inp.e) {
-      if (nearTower()) { g.water = Math.min(100, g.water + 35 * dt); g.coalStock = Math.min(30, g.coalStock + 5 * dt); }
-      else if (pressE) msg('給水塔の横で止まらないと水が入らない');
+      if (nearTower()) { g.water = Math.min(100, g.water + 60 * dt); g.coalStock = Math.min(30, g.coalStock + 12 * dt); }
+      else if (pressE) msg('給水塔の下でないと水が入らない');
     }
   }
   // 重いレバー：1人だとゆっくり、2人だと4倍速い
@@ -210,7 +215,7 @@ function tick(dt) {
   else g.pressure -= 5 * dt;
   g.pressure -= (Math.abs(g.reg) * Math.abs(g.v) * 0.03 + 0.8) * dt;
   if (g.venting) g.pressure -= 35 * dt;
-  g.fire = Math.max(0, g.fire - 2.5 * dt);
+  g.fire = Math.max(0, g.fire - 2 * dt);
   g.pressure = Math.max(0, g.pressure);
   if (g.pressure > 125 && playing) {
     g.pressure = 10; g.fire = 0; g.hp -= 25;
@@ -221,7 +226,7 @@ function tick(dt) {
   // ---- 4. 揺れで落ちる ----
   if (playing) for (const p of list) {
     if (!p.on || p.climb || p.input.e) continue;
-    if (Math.abs(acc) > 260) leaveTrain(p, '投げ出された！', true);
+    if (Math.abs(acc) > 300) leaveTrain(p, '投げ出された！', true);
     else if (Math.abs(g.v) > 280 && p.ly <= -400 && Math.random() < 0.25 * dt) leaveTrain(p, '振り落とされた！', true);
   }
 
@@ -247,9 +252,11 @@ function tick(dt) {
     const nx = it.lx + it.lvx * dt, ny = it.ly + it.lvy * dt;
     const ly = it.lvy >= 0 ? landY(nx, it.ly, ny) : null;
     if (ly !== null) { it.ly = ly; it.lvy = 0; it.lvx *= 0.5; if (Math.abs(it.lvx) < 5) it.lvx = 0; }
+    // 床に落ちている時間を数えて、5秒で消す
+    if (it.lvy === 0) { it.rest = (it.rest || 0) + dt; if (it.rest > 5) it.gone = true; }
     else it.ly = ny;
     it.lx = nx;
-    if (it.ly > -15 || it.lx < REAR - 10 || it.lx > FRONT + 10) { it.gone = true; msg('石炭が線路に落ちた'); }
+    if (!it.gone && (it.ly > -15 || it.lx < REAR - 10 || it.lx > FRONT + 10)) { it.gone = true; msg('石炭が線路に落ちた'); }
   }
   g.items = g.items.filter(i => !i.gone);
 
@@ -269,7 +276,7 @@ function tick(dt) {
 }
 
 function moveOnTrain(p, dir, inp, pressJ, pressD, dt) {
-  const speed = p.carry ? 60 : 110;
+  const speed = (p.carry ? 60 : 110) * (inp.sh ? 1.7 : 1);
   // はしごの上
   if (p.climb) {
     const ld = p.climb;
@@ -309,7 +316,7 @@ function moveOnTrain(p, dir, inp, pressJ, pressD, dt) {
 
 function moveOnGround(p, dir, inp, pressJ, dt) {
   // 小人の足は遅い
-  const target = dir * 90;
+  const target = dir * 90 * (inp.sh ? 1.8 : 1);
   p.wvx += (target - p.wvx) * Math.min(1, (p.grounded ? 5 : 1) * dt);
   if (pressJ && p.grounded) { p.wvy = -300; p.grounded = false; }
   p.wvy += 900 * dt;
@@ -356,7 +363,7 @@ io.on('connection', (socket) => {
   socket.on('input', (inp) => {
     const p = players[socket.id];
     if (!p || typeof inp !== 'object') return;
-    p.input = { l: !!inp.l, r: !!inp.r, u: !!inp.u, d: !!inp.d, j: !!inp.j, e: !!inp.e, q: !!inp.q, restart: !!inp.rst };
+    p.input = { l: !!inp.l, r: !!inp.r, u: !!inp.u, d: !!inp.d, j: !!inp.j, e: !!inp.e, q: !!inp.q, restart: !!inp.rst, sh: !!inp.sh };
   });
   socket.on('disconnect', () => {
     const p = players[socket.id];
@@ -379,13 +386,14 @@ setInterval(() => {
   }
   if (g.phase === 'result') { g.resultTimer += DT; if (g.resultTimer > 20) restart(); }
   tick(DT);
-  if (++frame % 2 === 0) {
+  frame++;
+  {
     io.emit('state', {
       g: {
         x: g.x, v: g.v, reg: g.reg, pressure: g.gaugeSeen ? g.pressure : null, danger: g.pressure > 100,
         fire: g.fire, water: g.water, coalStock: g.coalStock, brakeHeat: g.brakeHeat, brakeForce: g.brakeForce,
         venting: g.venting, whistling: g.whistling, hp: g.hp, phase: g.phase, result: g.result,
-        msgs: g.msgs.map(m => m.text), items: g.items.map(i => ({ lx: i.lx, ly: i.ly })),
+        msgs: g.msgs.map(m => m.text), items: g.items.map(i => ({ id: i.id, lx: i.lx, ly: i.ly, fade: i.holder ? 0 : (i.rest || 0) })),
       },
       players: Object.values(players).map(p => ({
         id: p.id, name: p.name, color: p.color, on: p.on, face: p.face,
