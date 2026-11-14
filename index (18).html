@@ -1,0 +1,351 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>止まれない機関車（仮）</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #2E2840; font-family: system-ui, "Hiragino Sans", "Yu Gothic", sans-serif; }
+  canvas { display: block; }
+  #join { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(46,40,64,0.92); }
+  #join .box { background: #F7EBD9; color: #2E2840; padding: 32px 40px; border-radius: 16px; display: flex; flex-direction: column; gap: 14px; width: 360px; }
+  #join h1 { margin: 0; font-size: 30px; }
+  #join input { font-size: 18px; padding: 10px 12px; border-radius: 8px; border: 2px solid #C9B8A3; }
+  #join button { font-size: 18px; font-weight: 700; padding: 12px; border: 0; border-radius: 8px; background: #D94F3D; color: #fff; cursor: pointer; }
+  #join p { margin: 0; font-size: 14px; line-height: 1.6; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="join">
+  <div class="box">
+    <h1>止まれない機関車</h1>
+    <label for="name">なまえ</label>
+    <input id="name" maxlength="10" placeholder="なまえ">
+    <button id="go">乗車する</button>
+    <p>←→ / AD：移動　Space / W：ジャンプ<br>E：操作（長押しも）　Q：加減弁を下げる<br>R：結果画面でもう一度</p>
+  </div>
+</div>
+<script src="/socket.io/socket.io.js"></script>
+<script>
+// ===== 線路（server.js と同じ計算） =====
+const L = 14000, STEP = 10;
+const FLATS = [[0, 500], [6800, 7200], [13300, 14000]];
+const TOWER_X = 7000, STOP_LINE = 13800, BUFFER_X = 13940, GAP = 190;
+function rawSlope(x) {
+  for (const f of FLATS) if (x >= f[0] && x <= f[1]) return 0;
+  return 0.10 + 0.12 * Math.cos(x / 500) + 0.17 * Math.cos(x / 170 + 1);
+}
+const H = [0];
+for (let i = 1; i <= L / STEP + 2; i++) H[i] = H[i - 1] + rawSlope((i - 0.5) * STEP) * STEP;
+function ground(x) {
+  x = Math.max(0, Math.min(L, x));
+  const i = Math.floor(x / STEP), t = x / STEP - i;
+  return H[i] * (1 - t) + H[i + 1] * t;
+}
+function slopeAt(x) { return (ground(x + 5) - ground(x - 5)) / 10; }
+
+const SPOT_LABEL = {
+  fire: '焚き口：[E]で石炭をくべる', reg: '加減弁：[E]上げる / [Q]下げる', brake: 'ブレーキ：[E]長押し',
+  valve: '安全弁：[E]長押しで圧力を抜く', whistle: '汽笛：[E]', couple: '連結器：[E]長押しで修理・連結',
+  tower: '給水塔：止まって[E]長押しで水と石炭',
+};
+
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+let W = 0, Hh = 0;
+function resize() { W = cv.width = innerWidth; Hh = cv.height = innerHeight; }
+addEventListener('resize', resize); resize();
+
+const socket = io();
+let myId = null, state = null, lastWhistle = 0, audio = null;
+const smoke = [];
+let camX = 300, camY = 0;
+
+document.getElementById('go').onclick = () => {
+  const n = document.getElementById('name').value.trim() || 'ななし';
+  socket.emit('join', n);
+  audio = new (window.AudioContext || window.webkitAudioContext)();
+  document.getElementById('join').style.display = 'none';
+};
+document.getElementById('name').addEventListener('keydown', e => { if (e.key === 'Enter') document.getElementById('go').click(); });
+socket.on('joined', d => { myId = d.id; });
+socket.on('state', s => {
+  if (state && s.g.whistle !== lastWhistle && s.g.whistle > 0) whistle();
+  lastWhistle = s.g.whistle;
+  state = s;
+});
+
+function whistle() {
+  if (!audio) return;
+  const t = audio.currentTime;
+  [523, 659].forEach(f => {
+    const o = audio.createOscillator(), gn = audio.createGain();
+    o.type = 'triangle'; o.frequency.value = f;
+    gn.gain.setValueAtTime(0.0001, t); gn.gain.exponentialRampToValueAtTime(0.15, t + 0.05);
+    gn.gain.exponentialRampToValueAtTime(0.0001, t + 0.9);
+    o.connect(gn).connect(audio.destination); o.start(t); o.stop(t + 1);
+  });
+}
+
+// ===== 入力 =====
+const keys = { l: false, r: false, j: false, e: false, q: false, rst: false };
+const MAP = { ArrowLeft: 'l', KeyA: 'l', ArrowRight: 'r', KeyD: 'r', Space: 'j', KeyW: 'j', ArrowUp: 'j', KeyE: 'e', KeyQ: 'q', KeyR: 'rst' };
+function setKey(e, v) {
+  if (document.getElementById('join').style.display !== 'none') return;
+  const k = MAP[e.code]; if (!k) return;
+  e.preventDefault();
+  if (keys[k] !== v) { keys[k] = v; socket.emit('input', keys); }
+}
+addEventListener('keydown', e => setKey(e, true));
+addEventListener('keyup', e => setKey(e, false));
+setInterval(() => { if (myId) socket.emit('input', keys); }, 200);
+
+// ===== 描画 =====
+function sx(x) { return x - camX + W / 2; }
+function sy(y) { return y - camY + Hh * 0.58; }
+
+function drawBackground() {
+  ctx.fillStyle = '#F6C177'; ctx.fillRect(0, 0, W, Hh);
+  ctx.fillStyle = '#EE9A62'; ctx.fillRect(0, 0, W, Hh * 0.18);
+  ctx.fillStyle = '#FFE2A0'; ctx.beginPath(); ctx.arc(W * 0.78, Hh * 0.28, 70, 0, Math.PI * 2); ctx.fill();
+  const layers = [[0.12, '#C9746A', 0.45, 120], [0.3, '#8E4F63', 0.6, 90]];
+  for (const [par, col, base, amp] of layers) {
+    ctx.fillStyle = col; ctx.beginPath(); ctx.moveTo(0, Hh);
+    for (let x = 0; x <= W + 40; x += 40) {
+      const wx = x + camX * par;
+      const y = Hh * base - amp * (0.5 + 0.5 * Math.sin(wx / 260) * Math.cos(wx / 610)) - (camY * par * 0.1);
+      ctx.lineTo(x, y);
+    }
+    ctx.lineTo(W, Hh); ctx.fill();
+  }
+}
+
+function drawTrack() {
+  const x0 = Math.max(0, camX - W / 2 - 50), x1 = Math.min(L, camX + W / 2 + 50);
+  ctx.fillStyle = '#4A3B5C'; ctx.beginPath(); ctx.moveTo(sx(x0), Hh);
+  for (let x = x0; x <= x1; x += 10) ctx.lineTo(sx(x), sy(ground(x)) + 6);
+  ctx.lineTo(sx(x1), Hh); ctx.fill();
+  ctx.strokeStyle = '#6B4F3A'; ctx.lineWidth = 6;
+  for (let x = Math.floor(x0 / 24) * 24; x <= x1; x += 24) {
+    ctx.beginPath(); ctx.moveTo(sx(x), sy(ground(x)) + 2); ctx.lineTo(sx(x + 10), sy(ground(x + 10)) + 2); ctx.stroke();
+  }
+  ctx.strokeStyle = '#E4DCCF'; ctx.lineWidth = 3; ctx.beginPath();
+  for (let x = x0; x <= x1; x += 10) { const X = sx(x), Y = sy(ground(x)); x === x0 ? ctx.moveTo(X, Y) : ctx.lineTo(X, Y); }
+  ctx.stroke();
+  // 距離標
+  ctx.fillStyle = '#F7EBD9'; ctx.font = 'bold 14px sans-serif'; ctx.textAlign = 'center';
+  for (let k = 1000; k < 13300; k += 1000) if (k > x0 && k < x1) {
+    const X = sx(k), Y = sy(ground(k));
+    ctx.fillRect(X - 2, Y - 40, 4, 40); ctx.fillText(`終点まで ${Math.round((STOP_LINE - k) / 10)}m`, X, Y - 46);
+  }
+}
+
+function drawStations() {
+  // 出発駅
+  plat(80, 520, '#B5473A', '山の上駅');
+  // 給水塔
+  if (Math.abs(TOWER_X - camX) < W) {
+    const X = sx(TOWER_X), Y = sy(ground(TOWER_X));
+    ctx.fillStyle = '#6E4B30'; ctx.fillRect(X - 30, Y - 90, 8, 90); ctx.fillRect(X + 22, Y - 90, 8, 90);
+    ctx.fillStyle = '#6FA8C9'; ctx.fillRect(X - 40, Y - 140, 80, 55);
+    ctx.fillStyle = '#2E2840'; ctx.fillRect(X - 44, Y - 146, 88, 8);
+    ctx.fillStyle = '#2E2840'; ctx.font = 'bold 15px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('給水塔', X, Y - 154);
+  }
+  // 終点
+  plat(13450, 13930, '#3D7DD9', 'ふもと村駅');
+  if (Math.abs(STOP_LINE - camX) < W) {
+    const X = sx(STOP_LINE), Y = sy(ground(STOP_LINE));
+    ctx.fillStyle = '#FFFFFF'; ctx.fillRect(X - 3, Y - 70, 6, 70);
+    ctx.font = 'bold 15px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('停止線', X, Y - 76);
+    const B = sx(BUFFER_X + 20), BY = sy(ground(BUFFER_X));
+    ctx.fillStyle = '#D94F3D'; ctx.fillRect(B - 8, BY - 40, 16, 40); ctx.fillStyle = '#FFD45C'; ctx.fillRect(B - 14, BY - 40, 28, 8);
+  }
+}
+function plat(a, b, roof, name) {
+  if (b < camX - W || a > camX + W) return;
+  const Y = sy(ground(a));
+  ctx.fillStyle = '#C9B8A3'; ctx.fillRect(sx(a), Y - 16, b - a, 16);
+  ctx.fillStyle = '#6E4B30'; ctx.fillRect(sx(a) + 20, Y - 110, 8, 94); ctx.fillRect(sx(b) - 28, Y - 110, 8, 94);
+  ctx.fillStyle = roof; ctx.fillRect(sx(a), Y - 122, b - a, 14);
+  ctx.fillStyle = '#FFFFFF'; ctx.fillRect(sx((a + b) / 2) - 60, Y - 104, 120, 28);
+  ctx.fillStyle = '#2E2840'; ctx.font = 'bold 16px sans-serif'; ctx.textAlign = 'center'; ctx.fillText(name, sx((a + b) / 2), Y - 84);
+}
+
+function withBody(x, fn) {
+  ctx.save(); ctx.translate(sx(x), sy(ground(x))); ctx.rotate(Math.atan(slopeAt(x))); fn(); ctx.restore();
+}
+function rect(x, y, w, h, c) { ctx.fillStyle = c; ctx.fillRect(x, y, w, h); }
+function circ(x, y, r, c) { ctx.fillStyle = c; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill(); }
+function rrect(x, y, w, h, r, c) { ctx.fillStyle = c; ctx.beginPath(); ctx.roundRect(x, y, w, h, r); ctx.fill(); }
+
+function drawLoco(gs) {
+  withBody(gs.loco.x, () => {
+    ctx.scale(0.57, 0.57);
+    rect(-185, -58, 340, 12, '#2A2533');
+    for (const wx of [-80, -10, 60]) { circ(wx, -26, 26, '#2A2533'); circ(wx, -26, 22, '#C4473A'); circ(wx, -26, 6, '#2A2533'); }
+    const ph = (gs.loco.x / 26) % (Math.PI * 2);
+    ctx.strokeStyle = '#B9B2BC'; ctx.lineWidth = 5; ctx.beginPath();
+    ctx.moveTo(-80 + Math.cos(ph) * 12, -26 + Math.sin(ph) * 12); ctx.lineTo(60 + Math.cos(ph) * 12, -26 + Math.sin(ph) * 12); ctx.stroke();
+    ctx.fillStyle = '#C4473A'; ctx.beginPath(); ctx.moveTo(150, -46); ctx.lineTo(182, -4); ctx.lineTo(150, -4); ctx.fill();
+    rrect(-40, -126, 170, 68, 30, '#2F6B5A');
+    rrect(100, -126, 44, 68, 20, '#2A2533');
+    rrect(-36, -100, 128, 42, 6, '#285C4D');
+    rect(0, -126, 8, 26, '#D9A441'); rect(64, -126, 8, 26, '#D9A441');
+    ctx.fillStyle = '#D9A441'; ctx.beginPath(); ctx.arc(40, -124, 22, Math.PI, 0); ctx.fill();
+    rect(104, -176, 28, 52, '#2A2533'); rrect(98, -186, 40, 12, 3, '#2A2533');
+    circ(148, -100, 10, '#FFE08A');
+    rect(-150, -170, 112, 112, '#2F6B5A');
+    rrect(-128, -154, 40, 36, 6, '#FFE2A0');
+    const glow = 0.4 + gs.fire / 160;
+    ctx.globalAlpha = Math.min(1, glow); rrect(-140, -102, 34, 34, 4, '#E8913A'); ctx.globalAlpha = 1;
+    rrect(-160, -182, 132, 14, 4, '#2A2533');
+    rect(-64, -196, 10, 14, '#D9A441');
+    if (!gs.coupled) { ctx.strokeStyle = '#8C8494'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(-192, -52, 5, 0, 7); ctx.stroke(); }
+  });
+}
+function drawWagon(gs) {
+  const x = gs.coupled ? gs.loco.x - GAP : gs.wagon.x;
+  withBody(x, () => {
+    circ(-50, -14, 14, '#2A2533'); circ(50, -14, 14, '#2A2533');
+    rect(-90, -34, 180, 9, '#2A2533');
+    rect(-86, -44, 172, 12, '#A85A32');
+    rect(-88, -46, 176, 4, '#D9A441');
+    rect(-88, -64, 6, 20, '#7E3F22'); rect(82, -64, 6, 20, '#7E3F22');
+    for (let i = 0; i < gs.cargo; i++) circ(-20 + i * 18, -52, 8, '#3E8E4E');
+    if (gs.coupled) rect(86, -36, 20, 4, '#8C8494');
+  });
+}
+function chimneyPos(gs) {
+  const x = gs.loco.x, a = Math.atan(slopeAt(x)), lx = 118 * 0.57, ly = -186 * 0.57;
+  return [sx(x) + lx * Math.cos(a) - ly * Math.sin(a), sy(ground(x)) + lx * Math.sin(a) + ly * Math.cos(a)];
+}
+function updateSmoke(gs, dt) {
+  const [cx, cy] = chimneyPos(gs);
+  const rate = 2 + gs.fire / 8;
+  for (let i = 0; i < rate * dt * 10; i++) smoke.push({ x: cx + camX, y: cy + camY, vx: -gs.loco.v * 0.3 - 20 + Math.random() * 20, vy: -40 - Math.random() * 30, r: 8, life: 1 });
+  if (gs.venting) for (let i = 0; i < 3; i++) {
+    const vx = gs.loco.x + 12 * 0.57;
+    smoke.push({ x: sx(vx) + camX, y: sy(ground(vx)) - 90 + camY, vx: (Math.random() - 0.5) * 80, vy: -120, r: 5, life: 0.6, white: true });
+  }
+  for (const s of smoke) { s.x += s.vx * dt; s.y += s.vy * dt; s.r += 18 * dt; s.life -= dt * 0.45; }
+  while (smoke.length && smoke[0].life <= 0) smoke.shift();
+  if (smoke.length > 300) smoke.splice(0, smoke.length - 300);
+}
+function drawSmoke() {
+  for (const s of smoke) {
+    if (s.life <= 0) continue;
+    ctx.globalAlpha = Math.max(0, s.life) * 0.8;
+    circ(s.x - camX, s.y - camY, s.r, s.white ? '#FFFFFF' : '#E3DAD0');
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawPlayer(p, me) {
+  const X = sx(p.x), Y = sy(p.y);
+  rect(X - 7, Y - 12, 5, 12, '#3A3550'); rect(X + 2, Y - 12, 5, 12, '#3A3550');
+  rrect(X - 8, Y - 32, 16, 21, 5, p.color);
+  circ(X, Y - 39, 7.5, '#F1C9A5');
+  ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(X, Y - 40, 8.5, Math.PI, 0); ctx.fill();
+  ctx.font = 'bold 13px sans-serif'; ctx.textAlign = 'center';
+  ctx.fillStyle = 'rgba(28,22,40,0.7)'; const w = ctx.measureText(p.name).width + 12;
+  ctx.fillRect(X - w / 2, Y - 66, w, 18);
+  ctx.fillStyle = me ? '#FFD45C' : '#FFFFFF'; ctx.fillText(p.name, X, Y - 52);
+}
+
+function bar(x, y, w, label, val, max, col, right) {
+  ctx.fillStyle = '#FFFFFF'; ctx.font = 'bold 13px sans-serif'; ctx.textAlign = 'left'; ctx.fillText(label, x, y);
+  ctx.textAlign = 'right'; ctx.fillText(right, x + w, y);
+  ctx.fillStyle = 'rgba(255,255,255,0.22)'; ctx.fillRect(x, y + 5, w, 8);
+  ctx.fillStyle = col; ctx.fillRect(x, y + 5, w * Math.max(0, Math.min(1, val / max)), 8);
+}
+function panel(x, y, w, h) { ctx.fillStyle = 'rgba(28,22,40,0.8)'; ctx.beginPath(); ctx.roundRect(x, y, w, h, 12); ctx.fill(); }
+
+function drawHUD(gs, me) {
+  panel(16, 16, 270, 262);
+  ctx.fillStyle = '#FFD45C'; ctx.font = 'bold 40px sans-serif'; ctx.textAlign = 'left';
+  ctx.fillText(Math.round(Math.abs(gs.loco.v) / 10), 30, 60);
+  ctx.fillStyle = '#FFFFFF'; ctx.font = 'bold 15px sans-serif'; ctx.fillText('km/h（ぐらい）', 90, 58);
+  const pc = gs.pressure > 100 ? '#D94F3D' : gs.pressure > 80 ? '#E8913A' : '#FFD45C';
+  bar(30, 86, 240, 'ボイラー圧力', gs.pressure, 125, pc, gs.pressure > 100 ? '危険！' : Math.round(gs.pressure));
+  bar(30, 116, 240, '火力', gs.fire, 100, '#E8913A', Math.round(gs.fire));
+  bar(30, 146, 240, '水', gs.water, 100, '#6FA8C9', Math.round(gs.water));
+  bar(30, 176, 240, '石炭', gs.coal, 30, '#B9B2BC', Math.floor(gs.coal) + '杯');
+  bar(30, 206, 240, 'ブレーキ温度', gs.brakeHeat, 150, '#E8913A', gs.brakeHeat > 90 ? '焼けてる' : '');
+  bar(30, 236, 240, '連結器', gs.couplerHP, 100, gs.coupled ? '#4FA36B' : '#D94F3D', gs.coupled ? Math.round(gs.couplerHP) : '外れた！');
+  ctx.fillStyle = '#FFFFFF'; ctx.font = 'bold 13px sans-serif'; ctx.textAlign = 'left';
+  ctx.fillText(`加減弁 ${gs.reg > 0 ? '前進' : gs.reg < 0 ? '後退' : '中立'} ${Math.round(Math.abs(gs.reg) * 100)}%`, 30, 270);
+
+  panel(W - 230, 16, 214, 92);
+  ctx.textAlign = 'left'; ctx.fillStyle = '#FFFFFF'; ctx.font = 'bold 15px sans-serif';
+  ctx.fillText(`機関車の耐久 ${Math.max(0, Math.round(gs.trainHP))}`, W - 214, 44);
+  ctx.fillText(`スイカ ${gs.cargo} / 3`, W - 214, 68);
+  ctx.fillText(`停止線まで ${Math.round((STOP_LINE - gs.loco.x) / 10)}m`, W - 214, 92);
+
+  // メッセージ
+  ctx.textAlign = 'center'; ctx.font = 'bold 22px sans-serif';
+  gs.msgs.slice(-3).forEach((m, i) => {
+    const w = ctx.measureText(m).width + 30;
+    ctx.fillStyle = 'rgba(217,79,61,0.9)'; ctx.fillRect(W / 2 - w / 2, 20 + i * 40, w, 34);
+    ctx.fillStyle = '#FFFFFF'; ctx.fillText(m, W / 2, 45 + i * 40);
+  });
+
+  // 操作できる場所の案内
+  if (me && me.spot) {
+    const t = SPOT_LABEL[me.spot];
+    ctx.font = 'bold 18px sans-serif'; const w = ctx.measureText(t).width + 30;
+    panel(W / 2 - w / 2, Hh - 120, w, 38);
+    ctx.fillStyle = '#FFD45C'; ctx.fillText(t, W / 2, Hh - 94);
+  }
+  // 置き去りの矢印
+  if (me && !me.on) {
+    const d = gs.loco.x - me.x;
+    if (Math.abs(d) > W / 2 - 40) {
+      const left = d < 0;
+      panel(left ? 16 : W - 196, Hh / 2 - 26, 180, 52);
+      ctx.fillStyle = '#FFD45C'; ctx.font = 'bold 18px sans-serif';
+      ctx.fillText(`${left ? '◀' : ''} 機関車 ${Math.round(Math.abs(d) / 10)}m ${left ? '' : '▶'}`, left ? 106 : W - 106, Hh / 2 + 6);
+    }
+  }
+  ctx.fillStyle = 'rgba(255,255,255,0.75)'; ctx.font = '13px sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText('←→ 移動 ／ Space ジャンプ ／ E 操作 ／ Q 加減弁を下げる', W / 2, Hh - 16);
+
+  if (gs.phase === 'result') {
+    ctx.fillStyle = 'rgba(28,22,40,0.75)'; ctx.fillRect(0, 0, W, Hh);
+    ctx.fillStyle = '#FFFFFF'; ctx.textAlign = 'center';
+    const r = gs.result;
+    if (r && r.ok) {
+      ctx.font = 'bold 48px sans-serif'; ctx.fillText(r.crashed ? '車止めに激突して到着…' : 'ふもと村に到着！', W / 2, Hh / 2 - 60);
+      ctx.fillStyle = '#FFD45C'; ctx.font = 'bold 56px sans-serif';
+      ctx.fillText('★'.repeat(r.stars) + '☆'.repeat(3 - r.stars), W / 2, Hh / 2 + 10);
+      ctx.fillStyle = '#FFFFFF'; ctx.font = 'bold 22px sans-serif';
+      ctx.fillText(`停止線からのズレ ${(r.err / 10).toFixed(1)}m ／ スイカ ${r.cargo}個 ／ 貨車 ${r.wagon ? 'あり' : '置いてきた'}`, W / 2, Hh / 2 + 60);
+    } else {
+      ctx.font = 'bold 48px sans-serif'; ctx.fillText('機関車が壊れた…', W / 2, Hh / 2);
+    }
+    ctx.font = 'bold 20px sans-serif'; ctx.fillText('R でもう一度', W / 2, Hh / 2 + 110);
+  }
+}
+
+let lastT = performance.now();
+function loop(t) {
+  const dt = Math.min(0.05, (t - lastT) / 1000); lastT = t;
+  if (state) {
+    const gs = state.g;
+    const me = state.players.find(p => p.id === myId);
+    const tx = me ? me.x : gs.loco.x;
+    camX += (tx - camX) * Math.min(1, dt * 8);
+    camY += (ground(camX) - 60 - camY) * Math.min(1, dt * 8);
+    drawBackground(); drawTrack(); drawStations();
+    updateSmoke(gs, dt); drawSmoke();
+    drawWagon(gs); drawLoco(gs);
+    for (const p of state.players) drawPlayer(p, p.id === myId);
+    drawHUD(gs, me);
+  } else {
+    ctx.fillStyle = '#2E2840'; ctx.fillRect(0, 0, W, Hh);
+  }
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
