@@ -3,377 +3,646 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>止まれない機関車（仮）小人版</title>
+<title>地図師たち（仮）</title>
 <style>
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #2E2840; font-family: system-ui, "Hiragino Sans", "Yu Gothic", sans-serif; }
-  canvas { display: block; }
-  #join { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(46,40,64,0.92); }
-  #join .box { background: #F7EBD9; color: #2E2840; padding: 28px 36px; border-radius: 16px; display: flex; flex-direction: column; gap: 12px; width: 400px; }
-  #join h1 { margin: 0; font-size: 28px; }
-  #join input { font-size: 18px; padding: 10px 12px; border-radius: 8px; border: 2px solid #C9B8A3; }
-  #join button { font-size: 18px; font-weight: 700; padding: 12px; border: 0; border-radius: 8px; background: #D94F3D; color: #fff; cursor: pointer; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #cfe3ea; font-family: system-ui, "Hiragino Sans", "Yu Gothic", sans-serif; }
+  #gl, #hud { position: fixed; inset: 0; display: block; }
+  #hud { pointer-events: none; }
+  #join { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; background: rgba(30,40,50,0.85); z-index: 5; }
+  #join .box { background: #F3E9D2; color: #2B2A33; padding: 28px 36px; border-radius: 14px; width: 440px; display: flex; flex-direction: column; gap: 12px; }
+  #join h1 { margin: 0; font-size: 30px; letter-spacing: 0.05em; }
+  #join input { font-size: 18px; padding: 10px 12px; border-radius: 8px; border: 2px solid #C9B48A; }
+  #join button { font-size: 18px; font-weight: 700; padding: 12px; border: 0; border-radius: 8px; background: #2F6B5A; color: #fff; cursor: pointer; }
   #join p { margin: 0; font-size: 14px; line-height: 1.7; }
 </style>
 </head>
 <body>
-<canvas id="c"></canvas>
+<canvas id="gl"></canvas>
+<canvas id="hud"></canvas>
 <div id="join">
   <div class="box">
-    <h1>止まれない機関車（小人版）</h1>
-    <p>小人たちで巨大な機関車を動かして、ふもと村の停止線にぴったり止めよう。</p>
+    <h1>地図師たち</h1>
+    <p>霧の海に浮かぶ島々を、自分の目と足で地図にしよう。<br>歩いた分だけ地図は塗られるけど、目印から離れるほど位置はずれていく。目印で「測量」すると、にじんだ地図がピタッと直る。</p>
     <label for="name">なまえ</label>
     <input id="name" maxlength="10" placeholder="なまえ">
-    <button id="go">乗車する</button>
-    <p>←→/AD 移動　Shift ダッシュ　↑↓/WS はしご・飛び降り　Space ジャンプ<br>E 操作・拾う（長押しも）　Q 投げる・加減弁を閉じる<br>R 結果画面でもう一度／2秒長押しでリセット</p>
+    <button id="go">港から出発する</button>
+    <p>画面クリックでマウス操作　WASD 移動　Shift 走る　Space ジャンプ<br>船：W/S 帆を上げ下げ　A/D 舵<br>E 乗る・降りる・ギルド　F 測量（目印の近くで）　M 大きな地図</p>
   </div>
 </div>
 <script src="/socket.io/socket.io.js"></script>
-<script>
-// ===== 線路と列車の形（server.js と同じ） =====
-const L = 16000, STEP = 10;
-const FLATS = [[0, 900], [7500, 8500], [14800, 16000]];
-const TOWER_X = 8000, STOP_FRONT = 15500, BUFFER_FRONT = 15700, FRONT = 560;
-function rawSlope(x) {
-  for (const f of FLATS) if (x >= f[0] && x <= f[1]) return 0;
-  return 0.07 + 0.09 * Math.cos(x / 700) + 0.07 * Math.cos(x / 300 + 1);
-}
-const H = [0];
-for (let i = 1; i <= L / STEP + 2; i++) H[i] = H[i - 1] + rawSlope((i - 0.5) * STEP) * STEP;
-function ground(x) { x = Math.max(0, Math.min(L, x)); const i = Math.floor(x / STEP), t = x / STEP - i; return H[i] * (1 - t) + H[i + 1] * t; }
-function trainAngle(x) { return Math.atan((ground(x + 400) - ground(x - 400)) / 800); }
-const LADDERS = [
-  { x: -545, top: -260, bottom: -20 }, { x: -150, top: -150, bottom: -20 }, { x: -250, top: -260, bottom: -150 },
-  { x: -215, top: -300, bottom: -150 }, { x: -100, top: -470, bottom: -300 }, { x: -32, top: -400, bottom: -150 },
-  { x: 422, top: -400, bottom: -150 },
-];
-const SPOT_POS = { coalpile: [-420, -260, '石炭の山'], waterin: [-300, -260, '給水口'], fire: [-75, -150, '焚き口'], brake: [-230, -150, 'ブレーキ'],
-  reg: [-125, -300, '加減弁'], gauge: [-185, -300, '圧力計'], whistle: [-10, -400, '汽笛'], valve: [120, -400, '安全弁'] };
-const PROMPT = {
-  coalpile: '石炭の山：[E]で石炭を持つ', waterin: '給水口：給水塔の下を通る間[E]長押し（止まらなくてOK）',
-  brake: 'ブレーキ：[E]長押し（2人で全力）', reg: '加減弁：[E]長押しで開く／[Q]長押しで閉じる（重い！2人だと4倍速い）',
-  gauge: '圧力計：ここにいる間、みんなに圧力が見える', whistle: '汽笛のひも：[E]長押しでぶら下がる', valve: '安全弁：[E]長押しで圧力を抜く',
-};
+<script type="importmap">{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }</script>
+<script type="module">
+import * as THREE from 'three';
 
-const cv = document.getElementById('c'), ctx = cv.getContext('2d');
-let W = 0, Hh = 0, Z = 1;
-function resize() { W = cv.width = innerWidth; Hh = cv.height = innerHeight; Z = Math.max(0.5, Math.min(1, W / 1500)); }
+// =====================================================================
+// 世界のつくり（全員の画面で同じ計算をするので、同じ島ができる）
+// =====================================================================
+const WORLD = 3000, HALF = WORLD / 2, CELL = 10, N = WORLD / CELL; // 地図は 300×300 マス（1マス10m）
+
+function hash(x, y) {
+  let h = Math.imul(x | 0, 374761393) ^ Math.imul(y | 0, 668265263);
+  h = Math.imul(h ^ (h >>> 13), 1274126177); h ^= h >>> 16;
+  return (h >>> 0) / 4294967296;
+}
+function vnoise(x, y) {
+  const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi;
+  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+  const a = hash(xi, yi), b = hash(xi + 1, yi), c = hash(xi, yi + 1), d = hash(xi + 1, yi + 1);
+  return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+}
+function fbm(x, y) { let s = 0, a = 0.5, f = 1; for (let i = 0; i < 4; i++) { s += a * vnoise(x * f, y * f); f *= 2; a *= 0.5; } return s; }
+
+const ISLANDS = [
+  { id: 0, name: '港の島', x: -900, z: 700, r: 160, peak: 35 },
+  { id: 1, name: '森の島', x: -150, z: -50, r: 240, peak: 60 },
+  { id: 2, name: '岩の島', x: 760, z: -620, r: 270, peak: 140 },
+  { id: 3, name: '小島', x: 330, z: 560, r: 80, peak: 20 },
+];
+function islandH(isl, x, z) {
+  const dx = x - isl.x, dz = z - isl.z, d = Math.hypot(dx, dz), ang = Math.atan2(dz, dx);
+  const rr = isl.r * (0.7 + 0.6 * fbm(Math.cos(ang) * 1.8 + isl.id * 7.3, Math.sin(ang) * 1.8 + isl.id * 3.1));
+  const t = 1 - d / rr;
+  if (t > 0) return 1.5 + Math.pow(t, 1.4) * isl.peak * (0.7 + 0.6 * fbm(x / 70 + isl.id, z / 70));
+  return 1.5 + t * rr * 0.14;
+}
+function heightAt(x, z) {
+  let h = -35;
+  for (const isl of ISLANDS) { const v = islandH(isl, x, z); if (v > h) h = v; }
+  return h + (fbm(x / 40 + 100, z / 40) - 0.47) * 3;
+}
+// 地形の種類：1深い海 2浅瀬 3砂浜 4森 5岩 6雪
+const TYPE_COLOR = { 0: [232, 220, 192], 1: [79, 127, 160], 2: [127, 179, 200], 3: [230, 211, 160], 4: [94, 143, 78], 5: [154, 140, 122], 6: [244, 244, 240] };
+function typeOf(h, x, z) {
+  if (h < -6) return 1; if (h < 0) return 2; if (h < 3.5) return 3;
+  if (h > 100) return 6;
+  if (h > 48 || (h > 25 && fbm(x / 30, z / 30) > 0.6)) return 5;
+  return 4;
+}
+function nearestIsland(x, z) {
+  let best = -1, bd = 1e9;
+  for (const isl of ISLANDS) { const d = Math.hypot(x - isl.x, z - isl.z) / isl.r; if (d < bd) { bd = d; best = isl.id; } }
+  return bd < 1.8 ? best : -1;
+}
+
+// マスごとの高さ・種類・島
+const GH = new Float32Array(N * N), GT = new Uint8Array(N * N), GI = new Int8Array(N * N);
+for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+  const x = -HALF + (i + 0.5) * CELL, z = -HALF + (j + 0.5) * CELL, k = j * N + i;
+  const h = heightAt(x, z); GH[k] = h; GT[k] = typeOf(h, x, z); GI[k] = h > -6 ? nearestIsland(x, z) : -1;
+}
+const cellOf = (x, z) => [Math.floor((x + HALF) / CELL), Math.floor((z + HALF) / CELL)];
+
+// 島の一番高い所（目印を立てる）と、港の位置
+function summitOf(id) {
+  let best = 0, bx = 0, bz = 0;
+  for (let k = 0; k < N * N; k++) if (GI[k] === id && GH[k] > best) { best = GH[k]; bx = -HALF + (k % N + 0.5) * CELL; bz = -HALF + (Math.floor(k / N) + 0.5) * CELL; }
+  return { x: bx, z: bz, h: best };
+}
+function shoreFrom(isl, ang) {
+  let last = { x: isl.x, z: isl.z };
+  for (let d = 0; d < isl.r * 2; d += 2) {
+    const x = isl.x + Math.cos(ang) * d, z = isl.z + Math.sin(ang) * d;
+    if (heightAt(x, z) < 0.6) return { land: last, sea: { x: isl.x + Math.cos(ang) * (d + 22), z: isl.z + Math.sin(ang) * (d + 22) } };
+    last = { x, z };
+  }
+  return { land: last, sea: last };
+}
+const PORT = shoreFrom(ISLANDS[0], 0.15);
+const LANDMARKS = [
+  { id: 'light', name: '港の灯台', kind: 'light', ...(() => { const s = shoreFrom(ISLANDS[0], -0.6).land; return { x: s.x, z: s.z }; })(), fix: 220 },
+  { id: 'forest', name: '森の島の石碑', kind: 'stone', ...summitOf(1), fix: 22 },
+  { id: 'rock', name: '岩の島の頂', kind: 'stone', ...summitOf(2), fix: 22 },
+  { id: 'islet', name: '小島の石碑', kind: 'stone', ...summitOf(3), fix: 22 },
+];
+const GUILD = { x: PORT.land.x - Math.cos(0.15) * 18, z: PORT.land.z - Math.sin(0.15) * 18 };
+
+// 海流（船だけが流される）
+function currentAt(x, z) {
+  let cx = 0, cz = 0;
+  const b = Math.exp(-Math.pow((z - 330) / 170, 2)) * (x > -800 && x < 700 ? 1 : 0.3); // 港と森の島の間：東向き
+  cx += 1.7 * b; cz += 0.5 * b;
+  const dx = x - 760, dz = z + 620, d = Math.hypot(dx, dz) || 1, ring = Math.exp(-Math.pow((d - 430) / 120, 2)); // 岩の島を回る流れ
+  cx += -dz / d * 2.0 * ring; cz += dx / d * 2.0 * ring;
+  return { x: cx, z: cz };
+}
+
+// =====================================================================
+// 3Dの準備
+// =====================================================================
+const glCanvas = document.getElementById('gl');
+const renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true });
+renderer.setPixelRatio(Math.min(2, devicePixelRatio));
+const scene = new THREE.Scene();
+const SKY = 0xcfe3ea;
+scene.background = new THREE.Color(SKY);
+scene.fog = new THREE.Fog(SKY, 60, 380);
+const camera = new THREE.PerspectiveCamera(60, 1, 0.5, 4000);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x406060, 0.9));
+const sun = new THREE.DirectionalLight(0xfff1d6, 1.1); sun.position.set(300, 500, 200); scene.add(sun);
+
+// 地形
+{
+  const seg = 300, geo = new THREE.PlaneGeometry(WORLD, WORLD, seg, seg);
+  geo.rotateX(-Math.PI / 2);
+  const pos = geo.attributes.position, col = new Float32Array(pos.count * 3);
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i), z = pos.getZ(i), h = heightAt(x, z);
+    pos.setY(i, h);
+    const c = TYPE_COLOR[typeOf(h, x, z)], n = 0.92 + fbm(x / 8, z / 8) * 0.16;
+    col[i * 3] = c[0] / 255 * n; col[i * 3 + 1] = c[1] / 255 * n; col[i * 3 + 2] = c[2] / 255 * n;
+  }
+  geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  geo.computeVertexNormals();
+  scene.add(new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true })));
+}
+// 海
+const water = new THREE.Mesh(new THREE.PlaneGeometry(WORLD * 2, WORLD * 2), new THREE.MeshPhongMaterial({ color: 0x2f7290, transparent: true, opacity: 0.82, shininess: 80 }));
+water.rotation.x = -Math.PI / 2; scene.add(water);
+// 木
+{
+  const spots = [];
+  for (let k = 0; k < N * N; k++) if (GT[k] === 4 && hash(k, 7) < 0.45) {
+    const x = -HALF + (k % N + hash(k, 1)) * CELL, z = -HALF + (Math.floor(k / N) + hash(k, 2)) * CELL;
+    spots.push([x, heightAt(x, z), z, 0.7 + hash(k, 3) * 0.7]);
+  }
+  const tree = new THREE.InstancedMesh(new THREE.ConeGeometry(2.6, 9, 6), new THREE.MeshLambertMaterial({ color: 0x3f6b3f, flatShading: true }), spots.length);
+  const m = new THREE.Matrix4();
+  spots.forEach((s, i) => { m.makeScale(s[3], s[3], s[3]); m.setPosition(s[0], s[1] + 4 * s[3], s[2]); tree.setMatrixAt(i, m); });
+  scene.add(tree);
+}
+// 目印（遠くからでも光が見える）
+const beaconMat = new THREE.MeshBasicMaterial({ color: 0xffd45c, fog: false });
+for (const L of LANDMARKS) {
+  const y = heightAt(L.x, L.z), g = new THREE.Group();
+  if (L.kind === 'light') {
+    const tower = new THREE.Mesh(new THREE.CylinderGeometry(2.2, 3.2, 26, 10), new THREE.MeshLambertMaterial({ color: 0xf3efe6 }));
+    tower.position.y = 13; g.add(tower);
+    const top = new THREE.Mesh(new THREE.CylinderGeometry(2.6, 2.6, 4, 10), new THREE.MeshLambertMaterial({ color: 0xc4473a }));
+    top.position.y = 28; g.add(top);
+    const lamp = new THREE.Mesh(new THREE.SphereGeometry(2, 10, 8), beaconMat); lamp.position.y = 31.5; g.add(lamp);
+  } else {
+    const st = new THREE.Mesh(new THREE.BoxGeometry(2.4, 9, 2.4), new THREE.MeshLambertMaterial({ color: 0x8c8494 }));
+    st.position.y = 4.5; g.add(st);
+    const lamp = new THREE.Mesh(new THREE.OctahedronGeometry(1.4), beaconMat); lamp.position.y = 10.5; g.add(lamp);
+  }
+  g.position.set(L.x, y, L.z); scene.add(g);
+}
+// ギルドの小屋と桟橋
+{
+  const y = heightAt(GUILD.x, GUILD.z), g = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.BoxGeometry(10, 6, 8), new THREE.MeshLambertMaterial({ color: 0xa8743f })); body.position.y = 3; g.add(body);
+  const roof = new THREE.Mesh(new THREE.ConeGeometry(8, 4, 4), new THREE.MeshLambertMaterial({ color: 0x3d5e8c })); roof.position.y = 8; roof.rotation.y = Math.PI / 4; g.add(roof);
+  g.position.set(GUILD.x, y, GUILD.z); scene.add(g);
+  const pier = new THREE.Mesh(new THREE.BoxGeometry(4, 0.8, 26), new THREE.MeshLambertMaterial({ color: 0x8a5a2b }));
+  pier.position.set((PORT.land.x + PORT.sea.x) / 2, 1.2, (PORT.land.z + PORT.sea.z) / 2);
+  pier.rotation.y = Math.atan2(PORT.sea.x - PORT.land.x, PORT.sea.z - PORT.land.z); scene.add(pier);
+}
+
+// 人と船の見た目
+function makePerson(color) {
+  const g = new THREE.Group();
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.45, 0.55, 1.3, 8), new THREE.MeshLambertMaterial({ color })); body.position.y = 0.75; g.add(body);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.38, 10, 8), new THREE.MeshLambertMaterial({ color: 0xf1c9a5 })); head.position.y = 1.7; g.add(head);
+  const hat = new THREE.Mesh(new THREE.CylinderGeometry(0.25, 0.6, 0.35, 10), new THREE.MeshLambertMaterial({ color: 0x6b4f3a })); hat.position.y = 2.05; g.add(hat);
+  const pack = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.7, 0.3), new THREE.MeshLambertMaterial({ color: 0x8a5a2b })); pack.position.set(0, 0.95, -0.45); g.add(pack);
+  return g;
+}
+function makeBoat(color) {
+  const g = new THREE.Group();
+  const hull = new THREE.Mesh(new THREE.BoxGeometry(2.6, 1.1, 7), new THREE.MeshLambertMaterial({ color: 0x8a5a2b })); hull.position.y = 0.3; g.add(hull);
+  const bow = new THREE.Mesh(new THREE.ConeGeometry(1.3, 2.2, 4), new THREE.MeshLambertMaterial({ color: 0x8a5a2b })); bow.rotation.x = Math.PI / 2; bow.rotation.y = Math.PI / 4; bow.position.set(0, 0.3, 4.5); g.add(bow);
+  const stripe = new THREE.Mesh(new THREE.BoxGeometry(2.7, 0.25, 7.05), new THREE.MeshLambertMaterial({ color })); stripe.position.y = 0.8; g.add(stripe);
+  const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.15, 8, 6), new THREE.MeshLambertMaterial({ color: 0x5a4030 })); mast.position.set(0, 4.6, 0.6); g.add(mast);
+  const sailPivot = new THREE.Group(); sailPivot.position.set(0, 1.4, 0.6); g.add(sailPivot);
+  const sail = new THREE.Mesh(new THREE.PlaneGeometry(4.2, 6), new THREE.MeshLambertMaterial({ color: 0xf3ead6, side: THREE.DoubleSide }));
+  sail.position.set(0, 3.2, -2.1); sail.rotation.y = Math.PI / 2; sailPivot.add(sail);
+  g.userData = { sailPivot, sail };
+  return g;
+}
+function setSail(boat, amount, relWind) {
+  const { sailPivot, sail } = boat.userData;
+  sail.scale.y = Math.max(0.05, amount); sail.position.y = 0.2 + 3 * Math.max(0.05, amount) + (1 - amount) * 3;
+  sailPivot.rotation.y = Math.max(-1.3, Math.min(1.3, relWind * 0.6));
+}
+function makeLabel(text, color) {
+  const c = document.createElement('canvas'); c.width = 256; c.height = 64;
+  const x = c.getContext('2d'); x.fillStyle = 'rgba(20,30,40,0.7)'; x.fillRect(0, 8, 256, 48);
+  x.font = 'bold 32px sans-serif'; x.textAlign = 'center'; x.fillStyle = color; x.fillText(text, 128, 44);
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), depthTest: false }));
+  s.scale.set(4, 1, 1); s.position.y = 3; return s;
+}
+
+// 海流の泡（流れが目で見える）
+const FOAM = 160;
+const foam = new THREE.InstancedMesh(new THREE.PlaneGeometry(0.9, 0.25), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55 }), FOAM);
+const foamPos = [];
+for (let i = 0; i < FOAM; i++) foamPos.push({ x: 0, z: 0, life: 0 });
+scene.add(foam);
+
+// =====================================================================
+// 自分の状態
+// =====================================================================
+const me = {
+  x: PORT.land.x, y: 2, z: PORT.land.z, vy: 0, ry: 0, onBoat: false, grounded: true,
+  boat: { x: PORT.sea.x, z: PORT.sea.z, h: Math.atan2(PORT.sea.x - PORT.land.x, PORT.sea.z - PORT.land.z), speed: 0, sail: 0 },
+  est: { x: PORT.land.x, z: PORT.land.z }, unc: 0, bias: 0, scale: 1,
+  money: 0, name: '', color: '#D94F3D',
+};
+const myPerson = makePerson(0xd94f3d); scene.add(myPerson);
+const myBoat = makeBoat(0xd94f3d); scene.add(myBoat);
+
+// 地図：confirmed=確定（正しい場所に、くっきり）、pending=にじみ（ずれた場所に、ぼんやり）
+let confirmed = new Uint8Array(N * N), sold = new Uint8Array(N * N);
+const pending = new Map(); // 本当のマス → [ずれx, ずれz]
+const foundLandmarks = new Set(), seenIslands = new Set();
+let mapDirty = true;
+function newLeg() { me.bias = (Math.random() - 0.5) * 0.14; me.scale = 1 + (Math.random() - 0.5) * 0.12; }
+newLeg();
+
+// 保存と読み込み（ブラウザに地図が残る）
+function save() {
+  try {
+    const enc = (a) => btoa(String.fromCharCode.apply(null, Array.from(a)));
+    localStorage.setItem('chizushi_v1', JSON.stringify({ c: chunkEnc(confirmed), s: chunkEnc(sold), money: me.money, lm: [...foundLandmarks], isl: [...seenIslands] }));
+  } catch (e) {}
+}
+function chunkEnc(a) { let s = ''; for (let i = 0; i < a.length; i += 8192) s += String.fromCharCode.apply(null, a.subarray(i, i + 8192)); return btoa(s); }
+function chunkDec(s) { const b = atob(s), a = new Uint8Array(b.length); for (let i = 0; i < b.length; i++) a[i] = b.charCodeAt(i); return a; }
+try {
+  const d = JSON.parse(localStorage.getItem('chizushi_v1') || 'null');
+  if (d) { confirmed = chunkDec(d.c); sold = chunkDec(d.s); me.money = d.money || 0; (d.lm || []).forEach(x => foundLandmarks.add(x)); (d.isl || []).forEach(x => seenIslands.add(x)); }
+} catch (e) {}
+setInterval(save, 8000);
+
+// =====================================================================
+// 入力
+// =====================================================================
+const keys = {};
+let yaw = Math.PI, pitch = 0.35, bigMap = false, started = false;
+addEventListener('keydown', (e) => {
+  if (!started) return;
+  keys[e.code] = true;
+  if (e.code === 'KeyM') bigMap = !bigMap;
+  if (e.code === 'KeyE') actionE();
+  if (e.code === 'KeyF') survey();
+  if (e.code === 'Space') e.preventDefault();
+});
+addEventListener('keyup', (e) => { keys[e.code] = false; });
+addEventListener('blur', () => { for (const k in keys) keys[k] = false; });
+glCanvas.addEventListener('click', () => { if (started) glCanvas.requestPointerLock(); });
+addEventListener('mousemove', (e) => {
+  if (document.pointerLockElement !== glCanvas) return;
+  yaw -= e.movementX * 0.0025; pitch = Math.max(-0.2, Math.min(1.3, pitch + e.movementY * 0.002));
+});
+
+// =====================================================================
+// メッセージ
+// =====================================================================
+const msgs = [];
+function msg(t) { const s = msgs.find(m => m.t === t); if (s) { s.time = performance.now(); return; } msgs.push({ t, time: performance.now() }); if (msgs.length > 4) msgs.shift(); }
+
+// =====================================================================
+// 行動：E（乗る・降りる・ギルド）と F（測量）
+// =====================================================================
+function actionE() {
+  if (me.onBoat) {
+    // 近くの陸に降りる
+    let best = null;
+    for (let a = 0; a < Math.PI * 2; a += Math.PI / 16) for (let d = 6; d <= 30; d += 3) {
+      const x = me.boat.x + Math.sin(a) * d, z = me.boat.z + Math.cos(a) * d;
+      if (heightAt(x, z) > 0.4 && (!best || d < best.d)) best = { x, z, d };
+    }
+    if (!best) { msg('近くに上陸できる陸がない'); return; }
+    me.est.x += best.x - me.boat.x; me.est.z += best.z - me.boat.z;
+    me.onBoat = false; me.x = best.x; me.z = best.z; me.y = heightAt(best.x, best.z); me.boat.speed = 0; me.boat.sail = 0;
+    msg('上陸した'); return;
+  }
+  if (Math.hypot(me.x - GUILD.x, me.z - GUILD.z) < 14) { sellMap(); return; }
+  if (Math.hypot(me.x - me.boat.x, me.z - me.boat.z) < 8) { me.est.x += me.boat.x - me.x; me.est.z += me.boat.z - me.z; me.onBoat = true; msg('船に乗った　W で帆を上げる'); return; }
+}
+function survey() {
+  for (const L of LANDMARKS) {
+    if (Math.hypot(me.x - L.x, me.z - L.z) < L.fix) {
+      let n = 0;
+      for (const [k] of pending) if (!confirmed[k]) { confirmed[k] = 1; n++; }
+      pending.clear();
+      const off = Math.hypot(me.est.x - me.x, me.est.z - me.z);
+      me.est.x = me.x; me.est.z = me.z; me.unc = 0; newLeg(); mapDirty = true;
+      if (!foundLandmarks.has(L.id)) { foundLandmarks.add(L.id); msg(`目印「${L.name}」を地図に記した`); }
+      msg(n > 0 ? `測量した！にじんでいた ${n} マスがくっきりした（ずれは ${off.toFixed(0)}m だった）` : '測量した。位置はもう正確だ');
+      save(); return;
+    }
+  }
+  msg('近くに目印がない（石碑や灯台の近くで F）');
+}
+function sellMap() {
+  let land = 0, sea = 0;
+  for (let k = 0; k < N * N; k++) if (confirmed[k] && !sold[k]) { sold[k] = 1; if (GT[k] >= 3) land++; else sea++; }
+  const g = land * 3 + sea;
+  me.money += g; save();
+  msg(g > 0 ? `ギルドに地図を売った：+${g} G（陸 ${land} マス、海 ${sea} マス）` : 'ギルド「新しくくっきり描けた所がないね」');
+  if (pending.size) msg(`にじんだ ${pending.size} マスは買い取れない。目印で測量しよう`);
+}
+
+// =====================================================================
+// 観測：見えている範囲を地図に塗る
+// =====================================================================
+function visRadius() {
+  if (me.onBoat) return 90;
+  const h = heightAt(me.x, me.z);
+  if (h > 40) return 150;           // 高い所は遠くまで見える
+  const [ci, cj] = cellOf(me.x, me.z), t = GT[cj * N + ci];
+  if (t === 4) return 28;           // 森は見通しが悪い
+  return 50;
+}
+function observe() {
+  const r = visRadius(), [ci, cj] = cellOf(me.x, me.z), rc = Math.ceil(r / CELL);
+  const ox = Math.round((me.est.x - me.x) / CELL), oz = Math.round((me.est.z - me.z) / CELL);
+  const crisp = me.unc < 8;
+  for (let dj = -rc; dj <= rc; dj++) for (let di = -rc; di <= rc; di++) {
+    if (di * di + dj * dj > rc * rc) continue;
+    const i = ci + di, j = cj + dj; if (i < 0 || j < 0 || i >= N || j >= N) continue;
+    const k = j * N + i;
+    if (GI[k] >= 0 && GT[k] >= 3 && !seenIslands.has(GI[k])) { seenIslands.add(GI[k]); msg(GI[k] === 0 ? '港の島' : '新しい島を見つけた！'); }
+    if (confirmed[k]) continue;
+    if (crisp) { confirmed[k] = 1; pending.delete(k); } else pending.set(k, [ox, oz]);
+  }
+  mapDirty = true;
+}
+setInterval(() => { if (started) observe(); }, 200);
+
+// =====================================================================
+// 地図の絵
+// =====================================================================
+const mapCanvas = document.createElement('canvas'); mapCanvas.width = N; mapCanvas.height = N;
+const mctx = mapCanvas.getContext('2d'), mimg = mctx.createImageData(N, N);
+function redrawMap() {
+  const d = mimg.data, P = TYPE_COLOR[0];
+  for (let k = 0; k < N * N; k++) {
+    const c = confirmed[k] ? TYPE_COLOR[GT[k]] : P;
+    d[k * 4] = c[0]; d[k * 4 + 1] = c[1]; d[k * 4 + 2] = c[2]; d[k * 4 + 3] = 255;
+  }
+  // にじみ：ずれた場所に、薄くぼんやり描く
+  for (const [k, o] of pending) {
+    const i = k % N + o[0] + Math.round((hash(k, 9) - 0.5) * 2), j = Math.floor(k / N) + o[1] + Math.round((hash(k, 8) - 0.5) * 2);
+    if (i < 0 || j < 0 || i >= N || j >= N) continue;
+    const t = j * N + i; if (confirmed[t]) continue;
+    const c = TYPE_COLOR[GT[k]];
+    d[t * 4] = (c[0] + P[0] * 1.3) / 2.3; d[t * 4 + 1] = (c[1] + P[1] * 1.3) / 2.3; d[t * 4 + 2] = (c[2] + P[2] * 1.3) / 2.3;
+  }
+  mctx.putImageData(mimg, 0, 0);
+  mapDirty = false;
+}
+setInterval(() => { if (mapDirty) redrawMap(); }, 400);
+
+// =====================================================================
+// 通信（マルチ）
+// =====================================================================
+const socket = io();
+let myId = null;
+const others = new Map();
+socket.on('joined', (d) => {
+  myId = d.id; me.color = d.color;
+  const c = new THREE.Color(d.color);
+  myPerson.children[0].material.color = c; myBoat.children[2].material.color = c;
+});
+socket.on('players', (list) => {
+  const alive = new Set();
+  for (const p of list) {
+    if (p.id === myId) continue;
+    alive.add(p.id);
+    let o = others.get(p.id);
+    if (!o) {
+      o = { person: makePerson(new THREE.Color(p.color)), boat: makeBoat(new THREE.Color(p.color)), data: p, lastShare: 0 };
+      o.person.add(makeLabel(p.name, p.color)); scene.add(o.person); scene.add(o.boat); others.set(p.id, o);
+    }
+    o.data = p;
+  }
+  for (const [id, o] of others) if (!alive.has(id)) { scene.remove(o.person); scene.remove(o.boat); others.delete(id); }
+});
+socket.on('share', (d) => {
+  const arr = new Uint8Array(d.data); let n = 0;
+  for (let k = 0; k < Math.min(arr.length, N * N); k++) if (arr[k] && !confirmed[k]) { confirmed[k] = 1; pending.delete(k); n++; }
+  for (const id of d.marks || []) if (LANDMARKS.some(L => L.id === id)) foundLandmarks.add(id);
+  mapDirty = true;
+  if (n > 0) msg(`${d.from} と地図を見せ合った（+${n} マス）`);
+});
+setInterval(() => {
+  if (!myId) return;
+  socket.emit('pos', { x: me.x, y: me.y, z: me.z, ry: me.ry, onBoat: me.onBoat, bx: me.boat.x, bz: me.boat.z, bry: me.boat.h, sail: me.boat.sail });
+  // 近くにいる仲間と地図を見せ合う（10秒に1回まで）
+  const now = performance.now();
+  for (const [id, o] of others) {
+    const p = o.data, px = p.onBoat ? p.bx : p.x, pz = p.onBoat ? p.bz : p.z;
+    const mx = me.onBoat ? me.boat.x : me.x, mz = me.onBoat ? me.boat.z : me.z;
+    if (Math.hypot(px - mx, pz - mz) < 40 && now - o.lastShare > 10000) {
+      o.lastShare = now; socket.emit('share', { to: id, data: confirmed.buffer.slice(0), marks: [...foundLandmarks] });
+    }
+  }
+}, 66);
+
+// =====================================================================
+// 毎フレームの動き
+// =====================================================================
+let windTo = 0.9, tNow = 0;
+function angDiff(a, b) { let d = a - b; while (d > Math.PI) d -= Math.PI * 2; while (d < -Math.PI) d += Math.PI * 2; return d; }
+
+function updateOnFoot(dt) {
+  const run = keys.ShiftLeft || keys.ShiftRight;
+  let mx = 0, mz = 0;
+  const fx = -Math.sin(yaw), fz = -Math.cos(yaw);
+  if (keys.KeyW) { mx += fx; mz += fz; } if (keys.KeyS) { mx -= fx; mz -= fz; }
+  if (keys.KeyA) { mx += fz; mz -= fx; } if (keys.KeyD) { mx -= fz; mz += fx; }
+  const len = Math.hypot(mx, mz);
+  const ground = heightAt(me.x, me.z), swim = ground < -1.0;
+  const sp = swim ? 2.5 : run ? 9 : 5;
+  let dx = 0, dz = 0;
+  if (len > 0) { dx = mx / len * sp * dt; dz = mz / len * sp * dt; me.ry = Math.atan2(mx, mz); }
+  const nx = Math.max(-HALF + 20, Math.min(HALF - 20, me.x + dx)), nz = Math.max(-HALF + 20, Math.min(HALF - 20, me.z + dz));
+  const nh = heightAt(nx, nz);
+  if (nh - Math.max(ground, me.y - 0.1) > 1.6 && !swim) { dx = 0; dz = 0; } // 急すぎる崖は登れない
+  else { me.x = nx; me.z = nz; }
+  // 推測位置：歩いた分を、少しずれた方向・距離で足していく
+  const d = Math.hypot(dx, dz);
+  if (d > 0) {
+    if (swim) { me.est.x += dx * 0.6; me.est.z += dz * 0.6; me.unc += d * 0.25; }
+    else {
+      const c = Math.cos(me.bias), s = Math.sin(me.bias);
+      me.est.x += (dx * c - dz * s) * me.scale; me.est.z += (dx * s + dz * c) * me.scale;
+      me.unc += d * (run ? 0.07 : 0.035);
+    }
+  }
+  const gh = heightAt(me.x, me.z);
+  if (gh < -1.0) { me.y = -0.5; me.vy = 0; me.grounded = true; }
+  else {
+    me.vy -= 22 * dt; me.y += me.vy * dt;
+    if (me.y <= gh) { me.y = gh; me.vy = 0; me.grounded = true; }
+    if (keys.Space && me.grounded) { me.vy = 7; me.grounded = false; }
+  }
+}
+function updateBoat(dt) {
+  const b = me.boat;
+  if (keys.KeyW) b.sail = Math.min(1, b.sail + 0.6 * dt);
+  if (keys.KeyS) b.sail = Math.max(0, b.sail - 0.6 * dt);
+  const turn = (keys.KeyA ? 1 : 0) - (keys.KeyD ? 1 : 0);
+  b.h += turn * 0.55 * Math.max(0.25, Math.min(1, Math.abs(b.speed) / 4)) * dt;
+  const rel = Math.abs(angDiff(b.h, windTo));
+  const f = rel > 2.4 ? 0.08 : 0.55 + 0.45 * Math.sin(rel);
+  const target = b.sail * 11 * f;
+  b.speed += (target - b.speed) * Math.min(1, 0.5 * dt);
+  const vx = Math.sin(b.h) * b.speed, vz = Math.cos(b.h) * b.speed, cur = currentAt(b.x, b.z);
+  const nx = b.x + (vx + cur.x) * dt, nz = b.z + (vz + cur.z) * dt;
+  if (heightAt(nx + Math.sin(b.h) * 3.5, nz + Math.cos(b.h) * 3.5) > -0.8) { b.speed *= 0.3; msg('浅瀬に乗り上げそう！　E で上陸できる'); }
+  else { b.x = Math.max(-HALF + 30, Math.min(HALF - 30, nx)); b.z = Math.max(-HALF + 30, Math.min(HALF - 30, nz)); }
+  // 推測位置：船の速さと向きだけで計算する（海流のことは分からない）
+  me.est.x += vx * dt; me.est.z += vz * dt;
+  me.unc += (1.0 + Math.abs(b.speed) * 0.03) * dt;
+  me.x = b.x; me.z = b.z; me.y = 1.2; me.ry = b.h;
+}
+
+function updateFoam(dt) {
+  const cx = me.onBoat ? me.boat.x : me.x, cz = me.onBoat ? me.boat.z : me.z, m = new THREE.Matrix4(), q = new THREE.Quaternion(), e = new THREE.Euler();
+  for (let i = 0; i < FOAM; i++) {
+    const f = foamPos[i];
+    f.life -= dt;
+    if (f.life <= 0 || Math.hypot(f.x - cx, f.z - cz) > 90) { f.x = cx + (Math.random() - 0.5) * 160; f.z = cz + (Math.random() - 0.5) * 160; f.life = 3 + Math.random() * 4; }
+    const c = currentAt(f.x, f.z); f.x += c.x * dt * 3; f.z += c.z * dt * 3;
+    const show = heightAt(f.x, f.z) < -2 && Math.hypot(c.x, c.z) > 0.25;
+    e.set(-Math.PI / 2, 0, Math.atan2(c.x, c.z) + Math.PI / 2); q.setFromEuler(e);
+    m.compose(new THREE.Vector3(f.x, 0.08, f.z), q, new THREE.Vector3(show ? 1 : 0.0001, show ? 1 : 0.0001, 1));
+    foam.setMatrixAt(i, m);
+  }
+  foam.instanceMatrix.needsUpdate = true;
+}
+
+// =====================================================================
+// 画面の文字と地図（HUD）
+// =====================================================================
+const hud = document.getElementById('hud'), hx = hud.getContext('2d');
+function panel(x, y, w, h) { hx.fillStyle = 'rgba(25,32,40,0.78)'; hx.beginPath(); hx.roundRect(x, y, w, h, 12); hx.fill(); }
+function txt(t, x, y, size, color, align) { hx.font = `bold ${size}px sans-serif`; hx.fillStyle = color; hx.textAlign = align || 'left'; hx.fillText(t, x, y); }
+function drawMapView(cx, cy, size, cellsAcross, centerI, centerJ, round) {
+  hx.save();
+  hx.beginPath(); if (round) hx.arc(cx, cy, size / 2, 0, Math.PI * 2); else hx.rect(cx - size / 2, cy - size / 2, size, size); hx.clip();
+  hx.fillStyle = 'rgb(232,220,192)'; hx.fillRect(cx - size / 2, cy - size / 2, size, size);
+  const sc = size / cellsAcross; hx.imageSmoothingEnabled = false;
+  hx.drawImage(mapCanvas, cx - centerI * sc, cy - centerJ * sc, N * sc, N * sc);
+  // 目印
+  for (const L of LANDMARKS) if (foundLandmarks.has(L.id)) {
+    const [i, j] = cellOf(L.x, L.z), x = cx + (i + 0.5 - centerI) * sc, y = cy + (j + 0.5 - centerJ) * sc;
+    hx.fillStyle = '#C4473A'; hx.beginPath(); hx.moveTo(x, y - 9); hx.lineTo(x - 6, y + 5); hx.lineTo(x + 6, y + 5); hx.fill();
+  }
+  // ギルド
+  { const [i, j] = cellOf(GUILD.x, GUILD.z); const x = cx + (i + 0.5 - centerI) * sc, y = cy + (j + 0.5 - centerJ) * sc; hx.fillStyle = '#3D5E8C'; hx.fillRect(x - 5, y - 5, 10, 10); }
+  // 自分が「いると思っている」場所と、その不確かさ
+  const ei = (me.est.x + HALF) / CELL, ej = (me.est.z + HALF) / CELL, ex = cx + (ei - centerI) * sc, ey = cy + (ej - centerJ) * sc;
+  if (me.unc > 2) { hx.strokeStyle = 'rgba(196,71,58,0.7)'; hx.lineWidth = 2; hx.setLineDash([5, 4]); hx.beginPath(); hx.arc(ex, ey, Math.max(6, me.unc / CELL * sc), 0, Math.PI * 2); hx.stroke(); hx.setLineDash([]); }
+  hx.save(); hx.translate(ex, ey); hx.rotate(-(me.onBoat ? me.boat.h : me.ry) + Math.PI);
+  hx.fillStyle = '#2B2A33'; hx.beginPath(); hx.moveTo(0, -9); hx.lineTo(6, 7); hx.lineTo(0, 3); hx.lineTo(-6, 7); hx.fill(); hx.restore();
+  hx.restore();
+  hx.strokeStyle = '#6B4F3A'; hx.lineWidth = 4; hx.beginPath(); if (round) hx.arc(cx, cy, size / 2, 0, Math.PI * 2); else hx.rect(cx - size / 2, cy - size / 2, size, size); hx.stroke();
+}
+function drawHUD() {
+  const W = hud.width, H = hud.height;
+  hx.clearRect(0, 0, W, H);
+  if (!started) return;
+  // 状態
+  panel(16, 16, 300, me.onBoat ? 170 : 120);
+  txt(`${me.money} G`, 30, 48, 24, '#FFD45C');
+  txt(me.onBoat ? '航海中' : (heightAt(me.x, me.z) < -1 ? '泳いでいる' : '徒歩'), 300, 46, 15, '#FFFFFF', 'right');
+  const u = me.unc;
+  txt(`位置の不確かさ　±${u.toFixed(0)}m`, 30, 78, 15, u < 8 ? '#9BE0B0' : u < 40 ? '#FFD45C' : '#FF8A7A');
+  txt(u < 8 ? '地図はくっきり描ける' : '地図はにじんでいる…目印で測量しよう', 30, 100, 13, '#D8D2E0');
+  if (me.onBoat) {
+    txt(`帆 ${Math.round(me.boat.sail * 100)}%　速さ ${me.boat.speed.toFixed(1)} m/s`, 30, 130, 15, '#FFFFFF');
+    // 風向き
+    const rel = windTo - (yaw + Math.PI); // 画面の上＝カメラの向き
+    hx.save(); hx.translate(270, 148); hx.rotate(-rel);
+    hx.strokeStyle = '#BFE0EF'; hx.lineWidth = 3; hx.beginPath(); hx.moveTo(0, 14); hx.lineTo(0, -14); hx.moveTo(-6, -6); hx.lineTo(0, -14); hx.lineTo(6, -6); hx.stroke(); hx.restore();
+    txt('風', 238, 154, 15, '#BFE0EF');
+    txt('W/S 帆　A/D 舵', 30, 158, 13, '#D8D2E0');
+  }
+  // 小さい地図（自分が「いると思っている」場所が真ん中）
+  const ms = Math.min(240, W * 0.22);
+  drawMapView(W - ms / 2 - 20, H - ms / 2 - 20, ms, 70, (me.est.x + HALF) / CELL, (me.est.z + HALF) / CELL, true);
+  txt('M 大きな地図', W - ms / 2 - 20, H - ms - 30, 13, '#2B2A33', 'center');
+  // 案内
+  let hint = null;
+  if (!me.onBoat && Math.hypot(me.x - GUILD.x, me.z - GUILD.z) < 14) hint = 'E ギルドに地図を売る（くっきりした所だけ）';
+  else if (!me.onBoat && Math.hypot(me.x - me.boat.x, me.z - me.boat.z) < 8) hint = 'E 船に乗る';
+  else if (me.onBoat && heightAt(me.boat.x + Math.sin(me.boat.h) * 12, me.boat.z + Math.cos(me.boat.h) * 12) > -2) hint = 'E 上陸する';
+  for (const L of LANDMARKS) if (Math.hypot(me.x - L.x, me.z - L.z) < L.fix) hint = `F 「${L.name}」で測量する`;
+  if (hint) { hx.font = 'bold 18px sans-serif'; const w = hx.measureText(hint).width + 30; panel(W / 2 - w / 2, H - 120, w, 38); txt(hint, W / 2, H - 94, 18, '#FFD45C', 'center'); }
+  // メッセージ
+  const now = performance.now();
+  for (let i = msgs.length - 1; i >= 0; i--) if (now - msgs[i].time > 5000) msgs.splice(i, 1);
+  msgs.forEach((m, i) => { hx.font = 'bold 18px sans-serif'; const w = hx.measureText(m.t).width + 30; panel(W / 2 - w / 2, 18 + i * 40, w, 34); txt(m.t, W / 2, 41 + i * 40, 18, '#FFFFFF', 'center'); });
+  if (document.pointerLockElement !== glCanvas) txt('画面をクリックするとマウスで見回せる', W / 2, H - 20, 14, '#2B2A33', 'center');
+  // 大きな地図
+  if (bigMap) {
+    const s = Math.min(W, H) * 0.86;
+    hx.fillStyle = 'rgba(20,25,30,0.55)'; hx.fillRect(0, 0, W, H);
+    drawMapView(W / 2, H / 2, s, N, N / 2, N / 2, false);
+    txt('あなたの地図　（赤い点線の円＝自分がいるかもしれない範囲）', W / 2, H / 2 - s / 2 - 12, 16, '#FFFFFF', 'center');
+    let total = 0; for (let k = 0; k < N * N; k++) total += confirmed[k];
+    txt(`くっきり ${total} マス　にじみ ${pending.size} マス　見つけた島 ${[...seenIslands].length} / ${ISLANDS.length}`, W / 2, H / 2 + s / 2 + 26, 16, '#FFFFFF', 'center');
+  }
+}
+
+// =====================================================================
+// ループ
+// =====================================================================
+function resize() {
+  renderer.setSize(innerWidth, innerHeight, false);
+  hud.width = innerWidth; hud.height = innerHeight;
+  camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+}
 addEventListener('resize', resize); resize();
 
-const socket = io();
-let myId = null, state = null, audio = null, whistleNode = null;
-let camX = 600, camY = 0;
-const smoke = [];
-
-document.getElementById('go').onclick = () => {
-  socket.emit('join', document.getElementById('name').value.trim() || 'ななし');
-  try { audio = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
-  document.getElementById('join').style.display = 'none';
-};
-document.getElementById('name').addEventListener('keydown', e => { if (e.key === 'Enter') document.getElementById('go').click(); });
-socket.on('joined', d => { myId = d.id; });
-// サーバーの状態を少し遅らせて、前後2つの間をなめらかにつなぐ（コマ送り防止）
-const snaps = [];
-socket.on('state', s => {
-  snaps.push({ t: performance.now(), s }); if (snaps.length > 40) snaps.shift();
-  state = s; whistleSound(s.g.whistling);
-});
-function lerp(a, b, k) { return a + (b - a) * k; }
-function viewState() {
-  if (!snaps.length) return null;
-  const rt = performance.now() - 90;
-  let a = null, b = null;
-  for (let i = snaps.length - 1; i > 0; i--) if (snaps[i - 1].t <= rt) { a = snaps[i - 1]; b = snaps[i]; break; }
-  if (!a) return snaps[0].s;
-  const k = Math.min(1.5, (rt - a.t) / Math.max(1, b.t - a.t));
-  const A = a.s, B = b.s;
-  if (Math.abs(B.g.x - A.g.x) > 300) return B; // リセット直後などは補間しない
-  const g = { ...B.g, x: lerp(A.g.x, B.g.x, k), v: lerp(A.g.v, B.g.v, k) };
-  const pa = new Map(A.players.map(p => [p.id, p]));
-  const players = B.players.map(p => {
-    const q = pa.get(p.id);
-    if (!q || q.on !== p.on) return p;
-    if (p.on) return Math.hypot(p.lx - q.lx, p.ly - q.ly) > 150 ? p : { ...p, lx: lerp(q.lx, p.lx, k), ly: lerp(q.ly, p.ly, k) };
-    return Math.hypot(p.wx - q.wx, p.wy - q.wy) > 400 ? p : { ...p, wx: lerp(q.wx, p.wx, k), wy: lerp(q.wy, p.wy, k) };
-  });
-  const ia = new Map(A.g.items.map(i => [i.id, i]));
-  g.items = B.g.items.map(i => { const q = ia.get(i.id); return q ? { ...i, lx: lerp(q.lx, i.lx, k), ly: lerp(q.ly, i.ly, k) } : i; });
-  return { g, players };
-}
-
-function whistleSound(on) {
-  if (!audio) return;
-  if (on && !whistleNode) {
-    const gn = audio.createGain(); gn.gain.value = 0.0001; gn.connect(audio.destination);
-    const os = [523, 659, 784].map(f => { const o = audio.createOscillator(); o.type = 'triangle'; o.frequency.value = f; o.connect(gn); o.start(); return o; });
-    gn.gain.exponentialRampToValueAtTime(0.08, audio.currentTime + 0.08);
-    whistleNode = { gn, os };
-  } else if (!on && whistleNode) {
-    const w = whistleNode; whistleNode = null;
-    w.gn.gain.exponentialRampToValueAtTime(0.0001, audio.currentTime + 0.15);
-    setTimeout(() => w.os.forEach(o => o.stop()), 200);
-  }
-}
-
-// ===== 入力 =====
-const keys = { l: false, r: false, u: false, d: false, j: false, e: false, q: false, rst: false, sh: false };
-const MAP = { ArrowLeft: 'l', KeyA: 'l', ArrowRight: 'r', KeyD: 'r', ArrowUp: 'u', KeyW: 'u', ArrowDown: 'd', KeyS: 'd', Space: 'j', KeyE: 'e', KeyQ: 'q', KeyR: 'rst', ShiftLeft: 'sh', ShiftRight: 'sh' };
-function setKey(e, v) {
-  if (document.getElementById('join').style.display !== 'none') return;
-  const k = MAP[e.code]; if (!k) return;
-  e.preventDefault();
-  if (keys[k] !== v) { keys[k] = v; socket.emit('input', keys); }
-}
-addEventListener('keydown', e => setKey(e, true));
-addEventListener('keyup', e => setKey(e, false));
-addEventListener('blur', () => { for (const k in keys) keys[k] = false; socket.emit('input', keys); });
-setInterval(() => { if (myId) socket.emit('input', keys); }, 200);
-
-// ===== 道具 =====
-function rect(x, y, w, h, c) { ctx.fillStyle = c; ctx.fillRect(x, y, w, h); }
-function rrect(x, y, w, h, r, c) { ctx.fillStyle = c; ctx.beginPath(); ctx.roundRect(x, y, w, h, r); ctx.fill(); }
-function circ(x, y, r, c) { ctx.fillStyle = c; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill(); }
-function line(x1, y1, x2, y2, c, w) { ctx.strokeStyle = c; ctx.lineWidth = w; ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke(); }
-function text(t, x, y, size, c, align) { ctx.font = `bold ${size}px sans-serif`; ctx.fillStyle = c; ctx.textAlign = align || 'center'; ctx.fillText(t, x, y); }
-function toWorld(gx, lx, ly) {
-  const a = trainAngle(gx), gy = ground(gx);
-  return { x: gx + lx * Math.cos(a) - ly * Math.sin(a), y: gy + lx * Math.sin(a) + ly * Math.cos(a) };
-}
-function worldCam() { ctx.setTransform(Z, 0, 0, Z, W / 2 - camX * Z, Hh * 0.62 - camY * Z); }
-
-// ===== 背景と線路 =====
-function drawSky() {
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  rect(0, 0, W, Hh, '#F6C177'); rect(0, 0, W, Hh * 0.16, '#EE9A62');
-  circ(W * 0.8, Hh * 0.22, 70, '#FFE2A0');
-  for (const [par, col, base, amp] of [[0.05, '#C9746A', 0.5, 160], [0.12, '#8E4F63', 0.66, 120]]) {
-    ctx.fillStyle = col; ctx.beginPath(); ctx.moveTo(0, Hh);
-    for (let x = 0; x <= W + 40; x += 40) {
-      const wx = x + camX * par;
-      ctx.lineTo(x, Hh * base - amp * (0.5 + 0.5 * Math.sin(wx / 300) * Math.cos(wx / 700)));
-    }
-    ctx.lineTo(W, Hh); ctx.fill();
-  }
-}
-function drawWorld() {
-  worldCam();
-  const x0 = Math.max(0, camX - W / 2 / Z - 60), x1 = Math.min(L, camX + W / 2 / Z + 60);
-  const bottom = camY + Hh / Z;
-  // 給水塔（小人から見ると巨大）
-  if (Math.abs(TOWER_X - camX) < W / Z) {
-    const gy = ground(TOWER_X);
-    rect(TOWER_X - 160, gy - 600, 26, 600, '#6E4B30'); rect(TOWER_X + 134, gy - 600, 26, 600, '#6E4B30');
-    line(TOWER_X - 147, gy - 560, TOWER_X + 147, gy - 120, '#6E4B30', 10); line(TOWER_X + 147, gy - 560, TOWER_X - 147, gy - 120, '#6E4B30', 10);
-    rrect(TOWER_X - 200, gy - 820, 400, 240, 20, '#6FA8C9'); rect(TOWER_X - 216, gy - 840, 432, 26, '#2E2840');
-    text('給水塔', TOWER_X, gy - 690, 40, '#2E2840');
-  }
-  station(-100, 1400, '#B5473A', '山の上駅');
-  station(14700, 15720, '#3D7DD9', 'ふもと村駅');
-  if (Math.abs(STOP_FRONT - camX) < W / Z) {
-    const gy = ground(STOP_FRONT);
-    rect(STOP_FRONT - 5, gy - 220, 10, 220, '#FFFFFF'); text('停止線', STOP_FRONT, gy - 232, 34, '#FFFFFF');
-    const bx = BUFFER_FRONT + 30, by = ground(BUFFER_FRONT);
-    rect(bx - 20, by - 160, 40, 160, '#D94F3D'); rect(bx - 44, by - 160, 88, 28, '#FFD45C');
-  }
-  // 地面
-  ctx.fillStyle = '#4A3B5C'; ctx.beginPath(); ctx.moveTo(x0, bottom);
-  for (let x = x0; x <= x1; x += 20) ctx.lineTo(x, ground(x) + 14);
-  ctx.lineTo(x1, bottom); ctx.fill();
-  for (let x = Math.floor(x0 / 60) * 60; x <= x1; x += 60) line(x, ground(x) + 8, x + 30, ground(x + 30) + 8, '#6B4F3A', 16);
-  ctx.strokeStyle = '#E4DCCF'; ctx.lineWidth = 6; ctx.beginPath();
-  for (let x = x0; x <= x1; x += 20) x === x0 ? ctx.moveTo(x, ground(x)) : ctx.lineTo(x, ground(x));
-  ctx.stroke();
-  for (let k = 2000; k < 15000; k += 2000) if (k > x0 && k < x1) {
-    const gy = ground(k); rect(k - 6, gy - 120, 12, 120, '#F7EBD9');
-    text(`停止線まで ${Math.round((STOP_FRONT - k) / 20)}m`, k, gy - 134, 30, '#F7EBD9');
-  }
-}
-function station(a, b, roof, name) {
-  if (b < camX - W / Z || a > camX + W / Z) return;
-  const gy = ground(a);
-  rect(a, gy - 60, b - a, 60, '#C9B8A3');
-  rect(a + 60, gy - 760, 30, 700, '#6E4B30'); rect(b - 90, gy - 760, 30, 700, '#6E4B30');
-  rect(a, gy - 800, b - a, 50, roof);
-  rrect((a + b) / 2 - 220, gy - 730, 440, 100, 10, '#FFFFFF');
-  text(name, (a + b) / 2, gy - 660, 60, '#2E2840');
-}
-
-// ===== 巨大機関車（列車の中の座標で描く） =====
-function ladderDraw(l) {
-  line(l.x - 9, l.top, l.x - 9, l.bottom, '#8C8494', 3); line(l.x + 9, l.top, l.x + 9, l.bottom, '#8C8494', 3);
-  for (let y = l.top + 8; y < l.bottom; y += 14) line(l.x - 9, y, l.x + 9, y, '#8C8494', 3);
-}
-function drawTrain(gs) {
-  const ph = gs.x / 70;
-  // 炭水車
-  rrect(-560, -255, 300, 200, 8, '#285C4D');
-  rect(-560, -260, 300, 10, '#D9A441');
-  const peak = -260 - 70 * (gs.coalStock / 30);
-  ctx.fillStyle = '#2A2533'; ctx.beginPath(); ctx.moveTo(-550, -260); ctx.lineTo(-500, peak); ctx.lineTo(-380, peak + 8); ctx.lineTo(-340, -260); ctx.fill();
-  rect(-312, -268, 24, 8, '#D9A441');
-  for (const wx of [-490, -330]) { circ(wx, -45, 45, '#2A2533'); circ(wx, -45, 38, '#C4473A'); circ(wx, -45, 9, '#2A2533'); }
-  // 運転台（中が見える断面）
-  rect(-285, -470, 245, 320, '#1F3D35');
-  rect(-285, -470, 14, 320, '#2F6B5A'); rect(-54, -470, 14, 230, '#2F6B5A');
-  rrect(-295, -484, 265, 16, 4, '#2A2533');
-  rrect(-260, -440, 60, 50, 6, '#FFE2A0'); rrect(-140, -440, 60, 50, 6, '#FFE2A0');
-  rect(-240, -300, 150, 8, '#8A5A2B');
-  // 加減弁レバー
-  const ang = gs.reg * 1.0;
-  line(-125, -300, -125 + Math.sin(ang) * 60, -300 - Math.cos(ang) * 60, '#2A2533', 8);
-  circ(-125 + Math.sin(ang) * 60, -300 - Math.cos(ang) * 60, 9, '#D94F3D');
-  // 圧力計
-  circ(-185, -350, 26, '#F3E6D0'); ctx.strokeStyle = '#D9A441'; ctx.lineWidth = 5; ctx.beginPath(); ctx.arc(-185, -350, 26, 0, 7); ctx.stroke();
-  if (gs.pressure !== null) { const a = -2.2 + (gs.pressure / 125) * 4.4; line(-185, -350, -185 + Math.sin(a) * 20, -350 - Math.cos(a) * 20, gs.pressure > 100 ? '#D94F3D' : '#2A2533', 3); }
-  else text('?', -185, -341, 26, '#8C8494');
-  // ブレーキハンドル
-  ctx.save(); ctx.translate(-230, -190); ctx.rotate(gs.brakeHeat / 10);
-  ctx.strokeStyle = '#C4473A'; ctx.lineWidth = 5; ctx.beginPath(); ctx.arc(0, 0, 22, 0, 7); ctx.stroke();
-  for (let i = 0; i < 4; i++) { ctx.rotate(Math.PI / 4); line(-22, 0, 22, 0, '#C4473A', 3); }
-  ctx.restore(); rect(-233, -170, 6, 20, '#2A2533');
-  // ボイラー
-  rrect(-45, -395, 480, 240, 100, '#2F6B5A');
-  rect(80, -395, 14, 240, '#D9A441'); rect(240, -395, 14, 240, '#D9A441');
-  ctx.fillStyle = '#D9A441'; ctx.beginPath(); ctx.arc(120, -395, 45, Math.PI, 0); ctx.fill();
-  rect(112, -452, 16, 14, '#D9A441');
-  rrect(400, -395, 85, 240, 40, '#2A2533'); circ(470, -275, 34, '#3A3440');
-  rect(330, -560, 50, 165, '#2A2533'); rrect(318, -576, 74, 22, 5, '#2A2533');
-  circ(500, -330, 18, '#FFE08A');
-  // 焚き口
-  ctx.globalAlpha = Math.min(1, 0.35 + gs.fire / 110); rrect(-95, -205, 34, 50, 6, '#E8913A'); ctx.globalAlpha = 1;
-  ctx.strokeStyle = '#2A2533'; ctx.lineWidth = 4; ctx.strokeRect(-95, -205, 34, 50);
-  // 汽笛
-  rect(-16, -450, 12, 50, '#D9A441'); rrect(-22, -460, 24, 14, 4, '#D9A441');
-  line(-6, -440, -6, -405, '#8A5A2B', 2);
-  // 通路・台枠・車輪
-  rect(-45, -150, 590, 10, '#2A2533'); rect(-285, -150, 240, 8, '#3A3440');
-  rect(-560, -140, 1120, 30, '#2A2533');
-  ctx.fillStyle = '#C4473A'; ctx.beginPath(); ctx.moveTo(520, -110); ctx.lineTo(580, -8); ctx.lineTo(520, -8); ctx.fill();
-  for (const wx of [40, 200, 360]) {
-    circ(wx, -70, 70, '#2A2533'); circ(wx, -70, 61, '#C4473A'); circ(wx, -70, 12, '#2A2533');
-    for (let i = 0; i < 8; i++) { const a = ph + i * Math.PI / 4; line(wx, -70, wx + Math.cos(a) * 58, -70 + Math.sin(a) * 58, '#9E3A2F', 4); }
-  }
-  line(40 + Math.cos(ph) * 30, -70 + Math.sin(ph) * 30, 360 + Math.cos(ph) * 30, -70 + Math.sin(ph) * 30, '#B9B2BC', 10);
-  rect(-170, -60, 40, 6, '#8C8494'); rect(-560, -60, 45, 6, '#8C8494');
-  LADDERS.forEach(ladderDraw);
-  // 場所の名前
-  for (const k in SPOT_POS) { const [x, y, n] = SPOT_POS[k]; text(n, x, y + 22, 13, 'rgba(255,255,255,0.75)'); }
-}
-
-function drawLittle(p, x, y, me) {
-  rect(x - 5, y - 8, 4, 8, '#3A3550'); rect(x + 1, y - 8, 4, 8, '#3A3550');
-  rrect(x - 6, y - 20, 12, 13, 4, p.color);
-  circ(x, y - 25, 5, '#F1C9A5');
-  ctx.fillStyle = p.color; ctx.beginPath(); ctx.arc(x, y - 26, 6, Math.PI, 0); ctx.fill();
-  if (p.carry) { circ(x, y - 40, 11, '#2A2533'); circ(x - 3, y - 43, 3, '#5A5470'); }
-  const fs = 12 / Z; ctx.font = `bold ${fs}px sans-serif`; ctx.textAlign = 'center';
-  const w = ctx.measureText(p.name).width + 8 / Z;
-  ctx.fillStyle = 'rgba(28,22,40,0.7)'; ctx.fillRect(x - w / 2, y - (p.carry ? 56 : 36) - fs - 2, w, fs + 4);
-  ctx.fillStyle = me ? '#FFD45C' : '#FFFFFF'; ctx.fillText(p.name, x, y - (p.carry ? 56 : 36));
-}
-
-function updateSmoke(gs, dt) {
-  const ch = toWorld(gs.x, 355, -580);
-  const n = (1 + gs.fire / 20) * dt * 10;
-  for (let i = 0; i < n; i++) smoke.push({ x: ch.x, y: ch.y, vx: -gs.v * 0.25 - 30 + Math.random() * 30, vy: -60 - Math.random() * 40, r: 22, life: 1 });
-  if (gs.venting) for (let i = 0; i < 4; i++) { const v = toWorld(gs.x, 120, -455); smoke.push({ x: v.x, y: v.y, vx: (Math.random() - 0.5) * 120, vy: -160, r: 10, life: 0.6, w: 1 }); }
-  if (gs.whistling) { const v = toWorld(gs.x, -10, -462); smoke.push({ x: v.x, y: v.y, vx: -gs.v * 0.2, vy: -120, r: 8, life: 0.5, w: 1 }); }
-  for (const s of smoke) { s.x += s.vx * dt; s.y += s.vy * dt; s.r += 30 * dt; s.life -= dt * 0.4; }
-  while (smoke.length && smoke[0].life <= 0) smoke.shift();
-  if (smoke.length > 400) smoke.splice(0, smoke.length - 400);
-}
-function drawSmoke() {
-  for (const s of smoke) { ctx.globalAlpha = Math.max(0, s.life) * 0.8; circ(s.x, s.y, s.r, s.w ? '#FFFFFF' : '#E3DAD0'); }
-  ctx.globalAlpha = 1;
-}
-
-// ===== HUD =====
-function panel(x, y, w, h) { ctx.fillStyle = 'rgba(28,22,40,0.82)'; ctx.beginPath(); ctx.roundRect(x, y, w, h, 12); ctx.fill(); }
-function bar(x, y, w, label, val, max, col, right) {
-  text(label, x, y, 13, '#FFFFFF', 'left'); text(String(right), x + w, y, 13, '#FFFFFF', 'right');
-  rect(x, y + 5, w, 8, 'rgba(255,255,255,0.22)'); rect(x, y + 5, w * Math.max(0, Math.min(1, val / max)), 8, col);
-}
-function drawHUD(gs, me) {
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  panel(16, 16, 290, 268);
-  text(String(Math.round(Math.abs(gs.v) / 10)), 30, 60, 40, '#FFD45C', 'left'); text('km/h（ぐらい）', 90, 58, 15, '#FFFFFF', 'left');
-  if (gs.pressure !== null) bar(30, 88, 260, 'ボイラー圧力', gs.pressure, 125, gs.pressure > 100 ? '#D94F3D' : '#FFD45C', gs.pressure > 100 ? '危険！' : Math.round(gs.pressure));
-  else { text('ボイラー圧力', 30, 88, 13, '#FFFFFF', 'left'); text(gs.danger ? 'シューシュー鳴ってる…' : '？？？', 290, 88, 13, gs.danger ? '#FF8A7A' : '#B9B2BC', 'right'); text('誰か圧力計を見て！', 30, 106, 12, '#B9B2BC', 'left'); }
-  bar(30, 122, 260, '火力', gs.fire, 100, '#E8913A', Math.round(gs.fire));
-  bar(30, 152, 260, '水', gs.water, 100, '#6FA8C9', Math.round(gs.water));
-  bar(30, 182, 260, '石炭の山', gs.coalStock, 30, '#B9B2BC', Math.floor(gs.coalStock) + '個');
-  bar(30, 212, 260, 'ブレーキ温度', gs.brakeHeat, 150, '#E8913A', gs.brakeHeat > 90 ? '焼けてる' : gs.brakeForce > 0 ? `効き${Math.round(gs.brakeForce * 100)}%` : '');
-  bar(30, 242, 260, '加減弁', Math.max(0, gs.reg), 1, '#4FA36B', gs.reg < 0 ? `後退 ${Math.round(-gs.reg * 100)}%` : `${Math.round(gs.reg * 100)}%`);
-  text(`機関車の耐久 ${Math.max(0, Math.round(gs.hp))}`, 30, 274, 13, '#FFFFFF', 'left');
-
-  panel(W - 250, 16, 234, 50);
-  text(`停止線まで ${Math.round((STOP_FRONT - gs.x - FRONT) / 20)}m`, W - 133, 48, 18, '#FFFFFF');
-
-  gs.msgs.slice(-3).forEach((m, i) => {
-    ctx.font = 'bold 20px sans-serif'; const w = ctx.measureText(m).width + 30;
-    rect(W / 2 - w / 2, 18 + i * 38, w, 32, 'rgba(217,79,61,0.9)'); text(m, W / 2, 41 + i * 38, 20, '#FFFFFF');
-  });
-
-  if (me) {
-    let t = null;
-    if (me.on && me.spot) t = me.spot === 'fire' ? (me.carry ? '焚き口：[E]で石炭を入れる' : '焚き口：石炭を持ってきて[E]') : PROMPT[me.spot];
-    if (me.on && me.carry && me.spot !== 'fire') t = (t ? t + '　' : '') + '[Q]で石炭を投げる（重いので遅い）';
-    if (me.on && !t && LADDERS.some(l => Math.abs(me.lx - l.x) < 14 && (Math.abs(me.ly - l.top) < 3 || Math.abs(me.ly - l.bottom) < 3))) t = '↑↓ ではしごを使う';
-    if (!me.on) {
-      const ld = [-545, -150].map(x => toWorld(gs.x, x, -20));
-      if (ld.some(w => Math.abs(me.wx - w.x) < 40)) t = '↑ ではしごに飛びつく！';
-    }
-    if (t) { ctx.font = 'bold 18px sans-serif'; const w = ctx.measureText(t).width + 30; panel(W / 2 - w / 2, Hh - 112, w, 38); text(t, W / 2, Hh - 86, 18, '#FFD45C'); }
-    if (!me.on) {
-      const d = gs.x - me.wx;
-      if (Math.abs(d) > W / 2 / Z - 600) {
-        const left = d < 0; panel(left ? 16 : W - 236, Hh / 2 - 26, 220, 52);
-        text(`${left ? '◀ ' : ''}機関車 ${Math.round(Math.abs(d) / 20)}m${left ? '' : ' ▶'}`, left ? 126 : W - 126, Hh / 2 + 6, 18, '#FFD45C');
-      }
-    }
-  }
-  text('←→ 移動　Shift ダッシュ　↑↓ はしご　Space ジャンプ　E 操作・拾う　Q 投げる／加減弁を閉じる　R長押し リセット', W / 2, Hh - 16, 13, 'rgba(255,255,255,0.8)');
-
-  if (gs.phase === 'result') {
-    rect(0, 0, W, Hh, 'rgba(28,22,40,0.75)');
-    const r = gs.result;
-    if (r && r.ok) {
-      text(r.crashed ? '車止めに激突して到着…' : 'ふもと村に到着！', W / 2, Hh / 2 - 60, 46, '#FFFFFF');
-      text('★'.repeat(r.stars) + '☆'.repeat(3 - r.stars), W / 2, Hh / 2 + 10, 56, '#FFD45C');
-      text(`停止線からのズレ ${(r.err / 20).toFixed(1)}m`, W / 2, Hh / 2 + 60, 22, '#FFFFFF');
-    } else text('機関車が壊れた…', W / 2, Hh / 2, 46, '#FFFFFF');
-    text('R でもう一度（20秒で自動的に最初から）', W / 2, Hh / 2 + 110, 20, '#FFFFFF');
-  }
-}
-
-let lastT = performance.now();
+let last = performance.now();
 function loop(t) {
-  const dt = Math.min(0.05, (t - lastT) / 1000); lastT = t;
-  const view = viewState();
-  if (view) {
-    const gs = view.g;
-    const me = view.players.find(p => p.id === myId);
-    let tx = gs.x, ty = ground(gs.x) - 250;
-    if (me) { const w = me.on ? toWorld(gs.x, me.lx, me.ly) : { x: me.wx, y: me.wy }; tx = w.x; ty = w.y - 60; }
-    camX += (tx - camX) * Math.min(1, dt * 8); camY += (ty - camY) * Math.min(1, dt * 6);
-    drawSky(); drawWorld();
-    updateSmoke(gs, dt);
-    worldCam();
-    ctx.translate(gs.x, ground(gs.x)); ctx.rotate(trainAngle(gs.x));
-    drawTrain(gs);
-    for (const it of gs.items) {
-      // 落ちて3秒を過ぎたら点滅して、5秒で消える
-      if (it.fade > 3 && Math.floor(performance.now() / 120) % 2) continue;
-      circ(it.lx, it.ly - 10, 11, '#2A2533'); circ(it.lx - 3, it.ly - 13, 3, '#5A5470');
-    }
-    for (const p of view.players) if (p.on) drawLittle(p, p.lx, p.ly, p.id === myId);
-    worldCam();
-    drawSmoke();
-    for (const p of view.players) if (!p.on) drawLittle(p, p.wx, p.wy, p.id === myId);
-    drawHUD(gs, me);
-  } else { ctx.setTransform(1, 0, 0, 1, 0, 0); rect(0, 0, W, Hh, '#2E2840'); }
+  const dt = Math.min(0.05, (t - last) / 1000); last = t; tNow += dt;
+  windTo += Math.sin(tNow * 0.013) * 0.004 * dt * 60 * 0.05;
+  if (started) { if (me.onBoat) updateBoat(dt); else updateOnFoot(dt); }
+  // 自分の見た目
+  myPerson.position.set(me.onBoat ? me.boat.x : me.x, me.onBoat ? 1.0 : me.y, me.onBoat ? me.boat.z : me.z);
+  myPerson.rotation.y = me.onBoat ? me.boat.h : me.ry;
+  myBoat.position.set(me.boat.x, Math.sin(tNow * 1.3) * 0.15, me.boat.z); myBoat.rotation.y = me.boat.h;
+  myBoat.rotation.z = Math.sin(tNow * 0.9) * 0.04;
+  setSail(myBoat, me.boat.sail, angDiff(windTo, me.boat.h));
+  // 仲間の見た目（なめらかに追いかける）
+  for (const [, o] of others) {
+    const p = o.data, k = Math.min(1, dt * 10);
+    const tx = p.onBoat ? p.bx : p.x, tz = p.onBoat ? p.bz : p.z, ty = p.onBoat ? 1.0 : p.y;
+    o.person.position.x += (tx - o.person.position.x) * k; o.person.position.y += (ty - o.person.position.y) * k; o.person.position.z += (tz - o.person.position.z) * k;
+    o.person.rotation.y = p.onBoat ? p.bry : p.ry;
+    o.boat.position.x += (p.bx - o.boat.position.x) * k; o.boat.position.z += (p.bz - o.boat.position.z) * k; o.boat.rotation.y = p.bry;
+    setSail(o.boat, p.sail, angDiff(windTo, p.bry));
+  }
+  updateFoam(dt);
+  // カメラ
+  const tx = me.onBoat ? me.boat.x : me.x, tz = me.onBoat ? me.boat.z : me.z, ty = (me.onBoat ? 2 : me.y + 1.6);
+  const dist = me.onBoat ? 20 : 9;
+  const cx = tx + Math.sin(yaw) * Math.cos(pitch) * dist, cz = tz + Math.cos(yaw) * Math.cos(pitch) * dist;
+  let cy = ty + Math.sin(pitch) * dist + 1;
+  cy = Math.max(cy, Math.max(heightAt(cx, cz), 0) + 1.2);
+  camera.position.set(cx, cy, cz); camera.lookAt(tx, ty, tz);
+  water.position.x = tx; water.position.z = tz;
+  renderer.render(scene, camera);
+  drawHUD();
   requestAnimationFrame(loop);
 }
 requestAnimationFrame(loop);
+
+document.getElementById('go').onclick = () => {
+  me.name = document.getElementById('name').value.trim() || 'ななし';
+  socket.emit('join', me.name);
+  document.getElementById('join').style.display = 'none';
+  started = true; glCanvas.requestPointerLock();
+  msg('港の島から出発。ギルドの小屋の横に船がある');
+  if (confirmed.some(v => v)) msg('前回の地図を持ってきた');
+};
+document.getElementById('name').addEventListener('keydown', (e) => { if (e.key === 'Enter') document.getElementById('go').click(); });
 </script>
 </body>
 </html>
