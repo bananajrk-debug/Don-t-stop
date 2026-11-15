@@ -1,7 +1,7 @@
 {
-  "name": "tomarenai-kikansha",
+  "name": "chizushi",
   "version": "0.1.0",
-  "description": "止まれない機関車（仮） ブラウザ試作版",
+  "description": "地図師たち（仮） 3D試作",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
